@@ -12,11 +12,11 @@ Touching the trackpad, moving a mouse or typing on an external keyboard no longe
 macOS turns the keyboard backlight on for *any* input. If you mostly use the trackpad in a dark room,
 the keys light up all the time. NightKeys keeps them dark until you actually type.
 
-- Built-in keyboard only — trackpad, mice and external keyboards are ignored
+- Built-in keyboard only: trackpad, mice and external keyboards are ignored
 - Optional: stays off in bright rooms, using the ambient light sensor with a threshold you choose
 - Works with the macOS settings, not around them: the timeout, low-light mode and brightness are the ones in
   **System Settings > Keyboard**, so a change in either place shows up in both
-- Tiny and event-driven: about 3 MB of memory and no CPU while idle — see [Footprint](#footprint)
+- Tiny and event-driven: about 3 MB of memory and no CPU while idle (see [Footprint](#footprint))
 - No polling: NightKeys sleeps until you press a key
 
 ## Requirements
@@ -58,8 +58,8 @@ Open **NightKeys** from Applications or Spotlight to change settings again.
 | Bright above (lux threshold) | NightKeys only |
 
 The window shows the live reading of the light sensor. Press **Use as limit** in a room where the keyboard
-should no longer light up. The sensor sits behind the display bezel and reads low — a fully lit room is often
-only about 10 lux — and the lid angle changes the reading noticeably, so calibrate at your usual angle.
+should no longer light up. The sensor sits behind the display bezel and reads low (a fully lit room is often
+only about 10 lux), and the lid angle changes the reading noticeably, so calibrate at your usual angle.
 
 Turning off **Enable NightKeys** stops the background agent and hands the backlight back to macOS.
 
@@ -141,7 +141,7 @@ Optionally remove NightKeys from **System Settings > Privacy & Security > Input 
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT license, see [LICENSE](LICENSE).
 
 The crow in the app icon is the [Font Awesome Free "crow" icon](https://fontawesome.com/icons/crow) by Fonticons,
 Inc., licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). See
