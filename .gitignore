@@ -1,0 +1,4 @@
+.build/
+.notes/
+.DS_Store
+release.local.mk
