@@ -17,6 +17,7 @@ the keys light up all the time. NightKeys keeps them dark until you actually typ
 - Works with the macOS settings, not around them: the timeout, low-light mode and brightness are the ones in
   **System Settings > Keyboard**, so a change in either place shows up in both
 - Tiny and event-driven: about 3 MB of memory and no CPU while idle — see [Footprint](#footprint)
+- No polling: NightKeys sleeps until you press a key
 
 ## Requirements
 
@@ -64,9 +65,9 @@ Turning off **Enable NightKeys** stops the background agent and hands the backli
 
 ## Footprint
 
-NightKeys is built to stay out of the way. The background agent uses about 3 MB of memory and no CPU while
-idle: it only receives built-in keyboard events and nothing runs on a timer, so using the trackpad never wakes
-it. It makes no network connections. The settings window runs only while it is open and quits when you close it.
+No polling: NightKeys sleeps until you press a key. The background agent uses about 3 MB of memory and
+no CPU while idle: it only receives built-in keyboard events, so using the trackpad never wakes it. It makes no
+network connections. The settings window runs only while it is open and quits when you close it.
 
 Measured on macOS 26.7.1 with `footprint` and `top`.
 
