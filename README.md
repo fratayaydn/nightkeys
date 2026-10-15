@@ -9,15 +9,13 @@
 NightKeys lights your MacBook's keyboard backlight **only when you type on the built-in keyboard**.
 Touching the trackpad, moving a mouse or typing on an external keyboard no longer wakes the light.
 
-macOS turns the keyboard backlight on for *any* input. If you mostly use the trackpad in a dark room,
+macOS turns the keyboard backlight on for *any* input. If you mostly use the trackpad in a dark room, like I do,
 the keys light up all the time. NightKeys keeps them dark until you actually type.
 
-- Built-in keyboard only: trackpad, mice and external keyboards are ignored
-- Optional: stays off in bright rooms, using the ambient light sensor with a threshold you choose
-- Works with the macOS settings, not around them: the timeout, low-light mode and brightness are the ones in
-  **System Settings > Keyboard**, so a change in either place shows up in both
-- Tiny and event-driven: about 3 MB of memory and no CPU while idle (see [Footprint](#footprint))
-- No polling: NightKeys sleeps until you press a key
+- Optionally stays off in bright rooms, using the ambient light sensor and a threshold you pick
+- Uses the timeout, low-light mode and brightness from **System Settings > Keyboard**, so a change in either place
+  shows up in both
+- About 3 MB of memory and no CPU while idle; it sleeps until you press a key (see [Footprint](#footprint))
 
 ## Requirements
 
@@ -45,8 +43,8 @@ open it and drag **NightKeys** to **Applications**. The app is signed with a Dev
 2. Allow NightKeys in **Input Monitoring** when macOS asks (or use the button in the window), then click
    **Check Again**.
 
-The settings window is only for settings: close it and NightKeys keeps running in the background.
-Open **NightKeys** from Applications or Spotlight to change settings again.
+You can close the window; NightKeys keeps running in the background. To change a setting later, open **NightKeys**
+again from Applications or Spotlight.
 
 ## Settings
 
@@ -65,9 +63,9 @@ Turning off **Enable NightKeys** stops the background agent and hands the backli
 
 ## Footprint
 
-No polling: NightKeys sleeps until you press a key. The background agent uses about 3 MB of memory and
-no CPU while idle: it only receives built-in keyboard events, so using the trackpad never wakes it. It makes no
-network connections. The settings window runs only while it is open and quits when you close it.
+The background agent uses about 3 MB of memory and no CPU while idle. It doesn't poll: it only receives built-in
+keyboard events, so using the trackpad never wakes it. It makes no network connections. The settings window runs
+only while it is open and quits when you close it.
 
 Measured on macOS 26.7.1 with `footprint` and `top`.
 
@@ -138,6 +136,14 @@ Optionally remove NightKeys from **System Settings > Privacy & Security > Input 
 ```sh
 /Applications/NightKeys.app/Contents/MacOS/nightkeysd --status   # prints the ambient light reading
 ```
+
+## More small Mac apps
+
+- [BalanceKeeper](https://github.com/fratayaydn/balancekeeper): puts the left/right audio balance back when macOS
+  shifts it
+- [CapsNow](https://github.com/fratayaydn/capsnow): turns off the Caps Lock delay, so quick taps register
+- [MicKeeper](https://github.com/fratayaydn/mickeeper): keeps AirPods and iPhones off the microphone, so AirPods don't
+  drop to call quality
 
 ## License
 
