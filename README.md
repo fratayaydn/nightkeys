@@ -128,8 +128,11 @@ To sign with your own Apple Developer ID instead:
 ## Uninstall
 
 Move **NightKeys** from Applications to the Trash (or `brew uninstall --cask nightkeys`). The background agent
-notices, gives the keyboard backlight back to macOS and quits. If you built it from source, `make uninstall` in
-the cloned folder also removes the settings.
+notices, gives the keyboard backlight back to macOS and quits. Your settings are kept in case you install it again.
+
+To remove the settings too, use `brew uninstall --zap --cask nightkeys` instead, or run
+`defaults delete io.github.fratayaydn.nightkeys` after moving the app to the Trash. If you built it from source,
+`make uninstall` in the cloned folder removes both the app and the settings.
 
 Optionally remove NightKeys from **System Settings > Privacy & Security > Input Monitoring**.
 
