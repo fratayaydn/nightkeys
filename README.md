@@ -6,11 +6,13 @@
   <img src="docs/screenshot.png" width="572" alt="The NightKeys settings window">
 </p>
 
-NightKeys lights your MacBook's keyboard backlight **only when you type on the built-in keyboard**.
-Touching the trackpad, moving a mouse or typing on an external keyboard no longer wakes the light.
+A MacBook lights its keyboard for any input. If you use the trackpad in a dark room, like I do, the keys light up
+every time you scroll or move the pointer, and they stay lit as long as you keep using it. Turning the backlight off
+doesn't help either, because then it's dark when you do want to type.
 
-macOS turns the keyboard backlight on for *any* input. If you mostly use the trackpad in a dark room, like I do,
-the keys light up all the time. NightKeys keeps them dark until you actually type.
+NightKeys lights the keyboard **only when you type on the built-in keyboard**. Touching the trackpad, moving a mouse
+or typing on an external keyboard no longer wakes the light. When you stop typing, it goes off after the timeout set
+in **System Settings > Keyboard**.
 
 - Optionally stays off in bright rooms, using the ambient light sensor and a threshold you pick
 - Uses the timeout, low-light mode and brightness from **System Settings > Keyboard**, so a change in either place
