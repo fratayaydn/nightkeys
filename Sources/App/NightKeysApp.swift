@@ -4,9 +4,99 @@
 // so changes made here or there show up in both places.
 import ServiceManagement
 import SwiftUI
+import UserNotifications
+import os.log
+
+private let updateLog = OSLog(subsystem: "io.github.fratayaydn.nightkeys", category: "updater")
+
+// Each callback owns its reply until completion, including after a timeout. The semaphore publishes the result.
+final class NotificationReply<Value>: @unchecked Sendable {
+    private let done = DispatchSemaphore(value: 0)
+    private var result: Result<Value, Error>?
+
+    func complete(_ result: Result<Value, Error>) {
+        self.result = result
+        done.signal()
+    }
+
+    func wait(_ step: String, deadline: DispatchTime = .now() + 30) throws -> Value {
+        guard done.wait(timeout: deadline) == .success, let result else {
+            os_log("%{public}@ timed out", log: updateLog, type: .error, step)
+            throw NSError(domain: "NightKeys.NotificationTimeout", code: 1)
+        }
+        return try result.get()
+    }
+}
+
+private func notificationStatus(_ center: UNUserNotificationCenter) throws -> UNAuthorizationStatus {
+    let reply = NotificationReply<UNAuthorizationStatus>()
+    center.getNotificationSettings { reply.complete(.success($0.authorizationStatus)) }
+    return try reply.wait("Notification settings")
+}
+
+private func authorizeUpdateNotifications() throws {
+    let reply = NotificationReply<Bool>()
+    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+        if let error { reply.complete(.failure(error)) }
+        else { reply.complete(.success(granted)) }
+    }
+    _ = try reply.wait("Notification authorization")
+}
+
+private func postUpdateNotification(_ request: UNNotificationRequest) throws {
+    let reply = NotificationReply<Void>()
+    UNUserNotificationCenter.current().add(request) { error in
+        if let error { reply.complete(.failure(error)) }
+        else { reply.complete(.success(())) }
+    }
+    try reply.wait("Post notification")
+}
+
+func notifyUpdate(
+    _ arguments: [String],
+    status: () throws -> UNAuthorizationStatus = { try notificationStatus(.current()) },
+    authorize: () throws -> Void = authorizeUpdateNotifications,
+    post: (UNNotificationRequest) throws -> Void = postUpdateNotification
+) -> Int32 {
+    guard arguments.count == 4, arguments[1] == "--notify-update",
+          arguments[3] == "--installed" || arguments[3] == "--available" else { return 2 }
+    let version = arguments[2]
+    let parts = version.split(separator: ".", omittingEmptySubsequences: false)
+    guard (1...3).contains(parts.count), parts.allSatisfy({ part in
+        !part.isEmpty && part.utf8.allSatisfy { (48...57).contains($0) }
+    }) else { return 2 }
+
+    do {
+        var authorization = try status()
+        if authorization == .notDetermined {
+            try authorize()
+            authorization = try status()
+        }
+        guard authorization == .authorized || authorization == .provisional else {
+            os_log("Notifications are not allowed", log: updateLog, type: .info)
+            return 0
+        }
+        let installed = arguments[3] == "--installed"
+        let content = UNMutableNotificationContent()
+        content.title = installed ? "NightKeys updated to \(version)"
+            : "NightKeys \(version) is available"
+        content.body = installed ? "The update was installed successfully." : "Open settings to install the update."
+        let request = UNNotificationRequest(identifier: "release-update", content: content, trigger: nil)
+        try post(request)
+        os_log("Release notification posted", log: updateLog, type: .info)
+        return 0
+    } catch {
+        let error = error as NSError
+        os_log("Release notification failed: %{public}@ %ld", log: updateLog, type: .error, error.domain, error.code)
+        return 1
+    }
+}
+
 
 let prefsDomain = "io.github.fratayaydn.nightkeys"
 let agentPlistName = "io.github.fratayaydn.nightkeys.agent.plist"
+let updaterPlistName = "io.github.fratayaydn.nightkeys.updater.plist"
+let updaterJob = "gui/\(getuid())/io.github.fratayaydn.nightkeys.updater"
 let settingsChangedNotification = Notification.Name("io.github.fratayaydn.nightkeys.SettingsChanged")
 let statusChangedNotification = Notification.Name("io.github.fratayaydn.nightkeys.StatusChanged")
 let verifyPermissionNotification = Notification.Name("io.github.fratayaydn.nightkeys.VerifyPermission")
@@ -34,6 +124,13 @@ final class Model: ObservableObject {
     @Published var ambientLux = -1.0
     @Published var agentStatus = SMAppService.Status.notRegistered
     @Published var permissionGranted: Bool?
+    @Published var errorMessage: String?
+
+    @Published var automaticUpdates = true
+    @Published var checkingUpdates = false
+    @Published var latestVersion: String?
+    @Published var lastUpdateCheck: Date?
+    let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
 
     let hasKeyboard = NTHasBacklitKeyboard()
     // The app's bundle identifier is prefsDomain, so its standard defaults are the domain the agent reads.
@@ -45,6 +142,7 @@ final class Model: ObservableObject {
         reregisterAfterUpdate()
         readSystemSettings()
         readAgentState()
+        readUpdateState()
         if let level = defaults.object(forKey: userBrightnessKey) as? Double { brightness = level }
         let stored = defaults.double(forKey: thresholdKey)
         thresholdLux = stored > 0 ? stored : defaultThresholdLux
@@ -80,13 +178,77 @@ final class Model: ObservableObject {
     /// constraint), so after an update the agent is registered again, if it was enabled. The new registration
     /// must wait until the old one is fully removed.
     private func reregisterAfterUpdate() {
-        guard defaults.string(forKey: registeredBuildKey) != currentBuildID else { return }
+        guard defaults.string(forKey: registeredBuildKey) != currentBuildID
+            || SMAppService.agent(plistName: updaterPlistName).status == .notRegistered else { return }
         defaults.set(currentBuildID, forKey: registeredBuildKey)
-        guard agent.status == .enabled else { return }
+        guard agent.status == .enabled || agent.status == .requiresApproval else { return }
         DispatchQueue.global().async { [weak self] in
             reregisterAgent()
             if !agentIsRunning() { reregisterAgent() }  // right after an update the first pass may not take
             DispatchQueue.main.async { self?.readAgentState() }
+        }
+    }
+
+    func readUpdateState() {
+        defaults.synchronize()
+        automaticUpdates = defaults.object(forKey: "AutomaticallyInstallUpdates") == nil
+            || defaults.bool(forKey: "AutomaticallyInstallUpdates")
+        latestVersion = defaults.string(forKey: "LatestVersion")
+        lastUpdateCheck = defaults.object(forKey: "LastUpdateCheck") as? Date
+    }
+
+    var availableVersion: String? {
+        guard let latestVersion else { return nil }
+        let latest = latestVersion.split(separator: ".").map(String.init)
+        let current = version.split(separator: ".").map(String.init)
+        for index in 0..<3 {
+            let a = index < latest.count ? latest[index] : "0"
+            let b = index < current.count ? current[index] : "0"
+            let comparison = a.compare(b, options: .numeric)
+            if comparison != .orderedSame { return comparison == .orderedDescending ? latestVersion : nil }
+        }
+        return nil
+    }
+
+    var lastCheckedText: String {
+        guard let lastUpdateCheck else { return "Last checked: never" }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return "Last checked \(formatter.localizedString(for: lastUpdateCheck, relativeTo: Date()))"
+    }
+
+    func setAutomaticUpdates(_ on: Bool) {
+        defaults.set(on, forKey: "AutomaticallyInstallUpdates")
+        defaults.synchronize()
+        automaticUpdates = on
+    }
+
+    func checkUpdates(install: Bool = false) {
+        guard !checkingUpdates else { return }
+        checkingUpdates = true
+        let executable = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/nightkeysd")
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let process = Process()
+            process.executableURL = executable
+            process.arguments = ["--update-check", "--force"] + (install ? ["--install"] : [])
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            var message: String?
+            do {
+                try process.run()
+                process.waitUntilExit()
+                if process.terminationReason != .exit || process.terminationStatus != 0 {
+                    message = "Could not complete the update. Try again later."
+                }
+            } catch {
+                message = "Could not check for updates: \(error.localizedDescription)"
+            }
+            let result = message
+            DispatchQueue.main.async {
+                self?.checkingUpdates = false
+                self?.errorMessage = result
+                self?.readUpdateState()
+            }
         }
     }
 
@@ -114,7 +276,7 @@ final class Model: ObservableObject {
 
     func setAgentEnabled(_ on: Bool) {
         do {
-            if on { try agent.register() } else { try agent.unregister() }
+            try setLoginItemsEnabled(on)
         } catch {
             NSLog("NightKeys: could not \(on ? "register" : "unregister") the agent: \(error)")
         }
@@ -213,10 +375,33 @@ struct ContentView: View {
             // Off means macOS has full control: these settings belong to NightKeys mode only.
             .disabled(!model.isEnabled)
             .opacity(model.isEnabled ? 1 : 0.45)
+
+            Section("Updates") {
+                Toggle(isOn: Binding(get: { model.automaticUpdates }, set: { model.setAutomaticUpdates($0) })) {
+                    Text("Install updates automatically")
+                    Text("Only updates signed by the developer and notarized by Apple.")
+                }
+                HStack {
+                    Text("Version \(model.version), \(model.lastCheckedText.lowercased().replacingOccurrences(of: "checked:", with: "checked"))")
+                        .lineLimit(1)
+                    Spacer()
+                    Button(model.checkingUpdates ? "Checking..." : "Check Now") { model.checkUpdates() }
+                        .disabled(model.checkingUpdates)
+                }
+                if !model.automaticUpdates, let version = model.availableVersion {
+                    Button("Install \(version)") { model.checkUpdates(install: true) }
+                        .disabled(model.checkingUpdates)
+                }
+            }
         }
         .formStyle(.grouped)
         .frame(width: 460)
         .fixedSize()
+        .alert("NightKeys", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
+            Button("OK") { model.errorMessage = nil }
+        } message: {
+            Text(model.errorMessage ?? "")
+        }
     }
 
     @ViewBuilder private var statusRow: some View {
@@ -287,6 +472,21 @@ struct StatusRow: View {
 
 let agentJob = "gui/\(getuid())/io.github.fratayaydn.nightkeys.agent"
 
+// Remove the updater first, since removing the main job can terminate the background process.
+func setLoginItemsEnabled(_ enabled: Bool) throws {
+    let names = enabled ? [agentPlistName, updaterPlistName] : [updaterPlistName, agentPlistName]
+    var firstError: Error?
+    for name in names {
+        let service = SMAppService.agent(plistName: name)
+        do {
+            if enabled { try service.register() } else { try service.unregister() }
+        } catch {
+            if firstError == nil { firstError = error }
+        }
+    }
+    if let firstError { throw firstError }
+}
+
 @discardableResult
 func launchctl(_ arguments: [String]) -> String {
     let process = Process()
@@ -309,11 +509,12 @@ func agentIsRunning() -> Bool { launchctl(["print", agentJob]).contains("state =
 /// Unregister, wait until launchd has dropped the job, register and start once: the sequence that refreshes
 /// the agent's launch constraint after an update (see scripts/install.sh).
 func reregisterAgent() {
-    let agent = SMAppService.agent(plistName: agentPlistName)
-    try? agent.unregister()
-    for _ in 0..<70 where !launchctl(["print", agentJob]).isEmpty { Thread.sleep(forTimeInterval: 0.5) }
+    try? setLoginItemsEnabled(false)
+    for job in [updaterJob, agentJob] {
+        for _ in 0..<70 where !launchctl(["print", job]).isEmpty { Thread.sleep(forTimeInterval: 0.5) }
+    }
     Thread.sleep(forTimeInterval: 1)
-    try? agent.register()
+    try? setLoginItemsEnabled(true)
     startAgentOnce()
     Thread.sleep(forTimeInterval: 2)
 }
@@ -322,12 +523,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         // `NightKeys --unregister` / `--register` (used by the Makefile): change the login item and quit.
         if CommandLine.arguments.contains("--unregister") {
-            try? SMAppService.agent(plistName: agentPlistName).unregister()
+            try? setLoginItemsEnabled(false)
             exit(0)
         }
         if CommandLine.arguments.contains("--register") {
             do {
-                try SMAppService.agent(plistName: agentPlistName).register()
+                try setLoginItemsEnabled(true)
                 startAgentOnce()
                 // This build is registered now; the window must not re-register it again (see reregisterAfterUpdate).
                 UserDefaults.standard.set(currentBuildID, forKey: registeredBuildKey)
@@ -343,7 +544,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
 
+#if !NOTIFICATION_TESTS
 @main
+#endif
+enum NightKeysMain {
+    @MainActor
+    static func main() {
+        // Inspect notification arguments before creating NSApplication, a delegate or any SwiftUI state.
+        if CommandLine.arguments.contains("--notify-update") {
+            exit(notifyUpdate(CommandLine.arguments))
+        }
+        NightKeysApp.main()
+    }
+}
+
 struct NightKeysApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 

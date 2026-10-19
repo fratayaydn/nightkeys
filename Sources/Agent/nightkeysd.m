@@ -9,6 +9,7 @@
 // CoreBrightness notifies us when any of them changes. The only NightKeys-specific setting, the lux threshold,
 // lives in the "io.github.fratayaydn.nightkeys" preferences domain; NightKeys.app posts SETTINGS_CHANGED_NOTIFICATION.
 #import <Foundation/Foundation.h>
+#import "Updater.h"
 #import <IOKit/hid/IOHIDManager.h>
 #import <IOKit/hidsystem/IOHIDLib.h>
 #import <IOKit/pwr_mgt/IOPMLib.h>
@@ -63,6 +64,7 @@ extern char **environ;
 - (BOOL)unregisterAndReturnError:(NSError **)error;
 @end
 #define AGENT_PLIST @"io.github.fratayaydn.nightkeys.agent.plist"
+#define UPDATER_PLIST @"io.github.fratayaydn.nightkeys.updater.plist"
 
 static const int kFadeInMs = 150, kFadeOutMs = 1000;
 static const double kLuxRecheckSeconds = 15;  // while typing, read the light sensor at most this often
@@ -291,10 +293,12 @@ static void verifyPermission(void) {
 // launchd does not start another copy of NightKeys at the next login.
 static void unregisterLoginItem(void) {
     if (!dlopen("/System/Library/Frameworks/ServiceManagement.framework/ServiceManagement", RTLD_NOW)) return;
-    Class cls = NSClassFromString(@"SMAppService");
-    NSError *error = nil;
-    if (![[cls agentServiceWithPlistName:AGENT_PLIST] unregisterAndReturnError:&error])
-        fprintf(stderr, "nightkeysd: could not remove the login item: %s\n", error.localizedDescription.UTF8String);
+    // Remove the updater first: unregistering the main job can stop this process immediately.
+    for (NSString *plist in @[UPDATER_PLIST, AGENT_PLIST]) {
+        NSError *error = nil;
+        if (![[NSClassFromString(@"SMAppService") agentServiceWithPlistName:plist] unregisterAndReturnError:&error])
+            fprintf(stderr, "nightkeysd: could not remove %s: %s\n", plist.UTF8String, error.localizedDescription.UTF8String);
+    }
 }
 
 // NightKeys.app was moved to the Trash or replaced by an update. An update puts a new copy at the same path
@@ -425,6 +429,15 @@ static void start(void) {
 
 int main(int argc, char **argv) {
     @autoreleasepool {
+        if (argc > 1 && !strcmp(argv[1], "--update-check")) {
+            BOOL force = NO, install = NO;
+            for (int i = 2; i < argc; i++) {
+                if (!strcmp(argv[i], "--force")) force = YES;
+                else if (!strcmp(argv[i], "--install")) install = YES;
+                else return 1;
+            }
+            return updaterRun(force, install);
+        }
         dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_NOW);
         gDisplay = [NSClassFromString(@"DisplayServicesClient") new];
         if (argc > 1 && !strcmp(argv[1], "--status")) {  // for scripts and debugging

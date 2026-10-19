@@ -63,11 +63,24 @@ only about 10 lux), and the lid angle changes the reading noticeably, so calibra
 
 Turning off **Enable NightKeys** stops the background agent and hands the backlight back to macOS.
 
+## Updates
+
+Once a day, and after a restart, NightKeys asks GitHub for the latest release and installs it if it's newer.
+An update is only installed when it's signed with the same Developer ID and notarized by Apple. The disk image
+is checked before it's opened, and the app inside is checked again before it replaces the old one. The check
+also runs at the first login after a macOS update, in case a fix for that version is already out.
+
+The check is one request to `api.github.com` that sends only the app name and version. macOS asks once whether
+NightKeys may show a notification after an update; you can change that later in **System Settings > Notifications**.
+Turn off **Install updates automatically** to get a notification instead and install from the window.
+Homebrew installs update themselves too. The cask is marked as auto-updating, so `brew upgrade` skips it unless
+you add `--greedy`.
+
 ## Footprint
 
 The background agent uses about 3 MB of memory and no CPU while idle. It doesn't poll: it only receives built-in
-keyboard events, so using the trackpad never wakes it. It makes no network connections. The settings window runs
-only while it is open and quits when you close it.
+keyboard events, so using the trackpad never wakes it. A separate, short daily update check contacts GitHub and
+then quits. The settings window runs only while it is open and quits when you close it.
 
 Measured on macOS 26.7.1 with `footprint` and `top`.
 
@@ -108,7 +121,7 @@ make install
 ```
 
 This builds `NightKeys.app`, copies it to `/Applications` and opens it. To update, pull and run `make install`
-again: settings, the permission and the login item are kept.
+again: settings, the permission and both login items are kept.
 
 ### Code signing
 
@@ -119,8 +132,8 @@ agent unable to start. Local builds are therefore signed with a self-signed cert
 your login keychain). The same certificate signs every build, so updates keep working.
 
 Even so, Background Task Management pins the login item to the exact build it registered. `scripts/install.sh`
-handles that: it unregisters the agent, replaces the app, registers it again and starts it once, which makes
-macOS accept the new build.
+handles that: it unregisters both jobs, replaces the app, registers both again and starts the agent once, which
+makes macOS accept the new build.
 
 To sign with your own Apple Developer ID instead:
 `make install SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"`.
@@ -128,7 +141,8 @@ To sign with your own Apple Developer ID instead:
 ## Uninstall
 
 Move **NightKeys** from Applications to the Trash (or `brew uninstall --cask nightkeys`). The background agent
-notices, gives the keyboard backlight back to macOS and quits. Your settings are kept in case you install it again.
+notices, gives the keyboard backlight back to macOS, removes both login items and quits. Your settings are kept
+in case you install it again.
 
 To remove the settings too, use `brew uninstall --zap --cask nightkeys` instead, or run
 `defaults delete io.github.fratayaydn.nightkeys` after moving the app to the Trash. If you built it from source,
@@ -140,7 +154,11 @@ Optionally remove NightKeys from **System Settings > Privacy & Security > Input 
 
 ```sh
 /Applications/NightKeys.app/Contents/MacOS/nightkeysd --status   # prints the ambient light reading
+/Applications/NightKeys.app/Contents/MacOS/nightkeysd --update-check --force
 ```
+
+The update command checks now and follows the automatic install setting. Add `--install` to install a newer
+version even when automatic installation is off.
 
 ## More small Mac apps
 
