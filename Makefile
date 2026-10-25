@@ -1,6 +1,6 @@
 # NightKeys: `make` builds .build/NightKeys.app (hidden, so Spotlight does not list the build copy), `make install` copies it to /Applications and opens it.
 # `make dmg` builds the disk image; `make release` builds, notarizes and staples it (Developer ID required).
-VERSION  := 1.0.1
+VERSION  := 1.0.2
 BUILD    ?= .build
 APP      := $(BUILD)/NightKeys.app
 STAGE    := $(BUILD)/stage/NightKeys.app
@@ -10,6 +10,10 @@ UPDATER_ID := io.github.fratayaydn.nightkeys.updater
 MIN_OS   := 13.0
 ARCH     := $(shell uname -m)
 CFLAGS   := -O2 -fobjc-arc -Wall -Werror -mmacosx-version-min=$(MIN_OS)
+DIAGNOSTIC_LOG ?= 0
+ifeq ($(DIAGNOSTIC_LOG),1)
+AGENT_DIAGNOSTIC_FLAGS := -DNIGHTKEYS_DIAGNOSTIC_LOG
+endif
 
 # Code signing identity. The default is a self-signed certificate created once per Mac by
 # scripts/create-signing-identity.sh: a fixed signature keeps Input Monitoring permission and the login item
@@ -30,26 +34,39 @@ NOTARY_PROFILE   ?= nightkeys-notary
 DMG              := $(RELEASE_DIR)/NightKeys-$(VERSION).dmg
 
 AGENT_SRC := Sources/Agent/nightkeysd.m Sources/Agent/Updater.m
-AGENT_HEADERS := Sources/Agent/Updater.h
+AGENT_HEADERS := Sources/Agent/Updater.h Sources/Agent/DiagnosticLog.h
 APP_SRC   := Sources/App/NightKeysApp.swift
 BRIDGE    := Sources/App/NightKeysBridge
 
-.PHONY: all test clean install uninstall signing-identity release-app dmg release updater-test-agent
+.PHONY: all test clean install uninstall signing-identity release-app dmg release updater-test-agent diagnostic FORCE
 
 all: $(APP)
+
+# Local troubleshooting build with an in-memory diagnostic log.
+diagnostic:
+	$(MAKE) DIAGNOSTIC_LOG=1 all
+
+FORCE:
+
+$(BUILD)/agent-build-mode: FORCE
+	@mkdir -p $(BUILD)
+	@if [ ! -f $@ ] || [ "$$(cat $@)" != "$(DIAGNOSTIC_LOG)" ]; then echo "$(DIAGNOSTIC_LOG)" > $@; fi
 
 signing-identity:
 	@if [ "$(SIGN_IDENTITY)" = "Local Code Signing" ]; then ./scripts/create-signing-identity.sh "$(SIGN_IDENTITY)"; fi
 
 # signing-identity is order-only (after |): it must exist, but checking for it must not force a rebuild.
-$(APP): $(AGENT_SRC) $(AGENT_HEADERS) $(APP_SRC) $(BRIDGE).h $(BRIDGE).m Resources/Info.plist Resources/$(AGENT_ID).plist Resources/$(UPDATER_ID).plist $(wildcard Resources/AppIcon.icns) | signing-identity
+$(APP): $(AGENT_SRC) $(AGENT_HEADERS) $(APP_SRC) $(BRIDGE).h $(BRIDGE).m Resources/Info.plist Resources/$(AGENT_ID).plist Resources/$(UPDATER_ID).plist $(wildcard Resources/AppIcon.icns) $(BUILD)/agent-build-mode Makefile | signing-identity
 	rm -rf $(STAGE)
 	mkdir -p $(BUILD)/module-cache $(CONTENTS)/MacOS $(CONTENTS)/Resources $(CONTENTS)/Library/LaunchAgents
-	clang $(CFLAGS) -framework Foundation -framework IOKit -framework Security $(AGENT_SRC) -o $(CONTENTS)/MacOS/nightkeysd
+	clang $(CFLAGS) $(AGENT_DIAGNOSTIC_FLAGS) -framework AppKit -framework Foundation -framework IOKit -framework Security $(AGENT_SRC) -o $(CONTENTS)/MacOS/nightkeysd
 	clang $(CFLAGS) -c $(BRIDGE).m -o $(BUILD)/NightKeysBridge.o
 	swiftc -O -warnings-as-errors -module-cache-path $(BUILD)/module-cache -swift-version 5 -parse-as-library -target $(ARCH)-apple-macos$(MIN_OS) -import-objc-header $(BRIDGE).h \
 		$(APP_SRC) $(BUILD)/NightKeysBridge.o -o $(CONTENTS)/MacOS/NightKeys
 	sed -e 's/VERSION/$(VERSION)/' -e "s/BUILD_ID/$$(date +%Y%m%d%H%M%S)/" Resources/Info.plist > $(CONTENTS)/Info.plist
+ifeq ($(DIAGNOSTIC_LOG),1)
+	/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion $(VERSION)d1' $(CONTENTS)/Info.plist
+endif
 	cp Resources/$(AGENT_ID).plist Resources/$(UPDATER_ID).plist $(CONTENTS)/Library/LaunchAgents/
 	if [ -f Resources/AppIcon.icns ]; then cp Resources/AppIcon.icns $(CONTENTS)/Resources/; fi
 	codesign $(SIGN_FLAGS) --identifier $(AGENT_ID) $(CONTENTS)/MacOS/nightkeysd
@@ -61,7 +78,7 @@ updater-test-agent: $(BUILD)/nightkeysd-updater-test
 
 $(BUILD)/nightkeysd-updater-test: $(AGENT_SRC) $(AGENT_HEADERS)
 	mkdir -p $(BUILD)
-	clang $(CFLAGS) -DUPDATER_TEST_FEED -framework Foundation -framework IOKit -framework Security $(AGENT_SRC) -o $@
+	clang $(CFLAGS) -DUPDATER_TEST_FEED -framework AppKit -framework Foundation -framework IOKit -framework Security $(AGENT_SRC) -o $@
 
 # scripts/install.sh replaces the app and keeps the background agent working across updates.
 install: $(APP)
@@ -70,7 +87,7 @@ install: $(APP)
 release-app:
 	@if [ -z "$(RELEASE_IDENTITY)" ]; then echo "Set RELEASE_IDENTITY (see the Makefile)."; exit 1; fi
 	rm -rf $(RELEASE_DIR)
-	$(MAKE) BUILD=$(RELEASE_DIR) SIGN_IDENTITY="$(RELEASE_IDENTITY)" TIMESTAMP=--timestamp
+	$(MAKE) BUILD=$(RELEASE_DIR) SIGN_IDENTITY="$(RELEASE_IDENTITY)" TIMESTAMP=--timestamp DIAGNOSTIC_LOG=0 AGENT_DIAGNOSTIC_FLAGS=
 
 # Disk image only, without notarization: for checking the window layout.
 dmg: release-app
@@ -91,11 +108,22 @@ uninstall:
 clean:
 	rm -rf .build
 
-# Updater checks use private fixtures and simulated notifications, without changing system settings.
-test: $(BUILD)/updater-tests $(BUILD)/updater-tool-tests $(BUILD)/notification-tests
+# Checks use private fixtures and simulated notifications, without changing system settings.
+test: $(BUILD)/updater-tests $(BUILD)/updater-tool-tests $(BUILD)/notification-tests $(BUILD)/backlight-tests $(BUILD)/nightkeysd-diagnostic-check $(BUILD)/diagnostic-tests
 	$(BUILD)/updater-tests
 	$(BUILD)/updater-tool-tests
 	$(BUILD)/notification-tests
+	$(BUILD)/backlight-tests
+	$(BUILD)/diagnostic-tests
+
+$(BUILD)/nightkeysd-diagnostic-check: $(AGENT_SRC) $(AGENT_HEADERS)
+	mkdir -p $(BUILD)
+	clang $(CFLAGS) -DNIGHTKEYS_DIAGNOSTIC_LOG -framework AppKit -framework Foundation -framework IOKit -framework Security $(AGENT_SRC) -o $@
+
+$(BUILD)/diagnostic-tests: $(AGENT_SRC) $(AGENT_HEADERS) Tests/backlight.m Tests/diagnostic.m
+	mkdir -p $(BUILD)
+	clang $(CFLAGS) -DNIGHTKEYS_DIAGNOSTIC_LOG -framework AppKit -framework Foundation -framework IOKit -framework Security \
+		Tests/diagnostic.m Sources/Agent/Updater.m -o $@
 
 $(BUILD)/updater-tests: Sources/Agent/Updater.m $(AGENT_HEADERS) Tests/updater.m
 	mkdir -p $(BUILD)
@@ -114,3 +142,8 @@ $(BUILD)/notification-tests: $(APP_SRC) $(BRIDGE).h $(BUILD)/NightKeysBridge.o T
 	swiftc -O -warnings-as-errors -module-cache-path $(BUILD)/module-cache -swift-version 5 -parse-as-library \
 		-target $(ARCH)-apple-macos$(MIN_OS) -import-objc-header $(BRIDGE).h -DNOTIFICATION_TESTS \
 		$(APP_SRC) $(BUILD)/NightKeysBridge.o Tests/notifications.swift -o $@
+
+$(BUILD)/backlight-tests: $(AGENT_SRC) $(AGENT_HEADERS) Tests/backlight.m
+	mkdir -p $(BUILD)
+	clang $(CFLAGS) -framework AppKit -framework Foundation -framework IOKit -framework Security \
+		Tests/backlight.m Sources/Agent/Updater.m -o $@

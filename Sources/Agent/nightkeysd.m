@@ -9,6 +9,7 @@
 // CoreBrightness notifies us when any of them changes. The only NightKeys-specific setting, the lux threshold,
 // lives in the "io.github.fratayaydn.nightkeys" preferences domain; NightKeys.app posts SETTINGS_CHANGED_NOTIFICATION.
 #import <Foundation/Foundation.h>
+#import <AppKit/NSWorkspace.h>
 #import "Updater.h"
 #import <IOKit/hid/IOHIDManager.h>
 #import <IOKit/hidsystem/IOHIDLib.h>
@@ -20,6 +21,7 @@
 #include <spawn.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#import "DiagnosticLog.h"
 
 extern char **environ;
 
@@ -126,19 +128,76 @@ static double ambientLux(void) {
     return lux ? lux.doubleValue : -1;
 }
 
+static void systemSettingChanged(NSString *key, id value);
+
+static BOOL builtInKeyboardID(unsigned long long *keyboard) {
+    for (NSNumber *n in [gClient copyKeyboardBacklightIDs]) {
+        if ([gClient isKeyboardBuiltIn:n.unsignedLongLongValue]) {
+            *keyboard = n.unsignedLongLongValue;
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void registerKeyboardNotifications(void) {
+    unsigned long long keyboard = gKbd;
+    [gClient registerNotificationForKeys:@[ CB_IDLE_DIM_TIME, CB_AUTO_BRIGHTNESS, CB_BRIGHTNESS ]
+                            keyboardID:keyboard block:^(id key, id value) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (keyboard == gKbd) systemSettingChanged(key, value);
+        });
+    }];
+}
+
+static void refreshKeyboard(void) {
+    unsigned long long current = 0;
+    BOOL found = builtInKeyboardID(&current);
+    if (!found) DIAG(@"keyboard ID re-resolution: not found (old=%llu)", gKbd);
+    else if (current == gKbd) DIAG(@"keyboard ID re-resolution: unchanged %llu", current);
+    else DIAG(@"keyboard ID re-resolution: changed %llu->%llu", gKbd, current);
+    if (found && current != gKbd) {
+        gKbd = current;
+        registerKeyboardNotifications();
+        [gClient suspendIdleDimming:YES forKeyboard:gKbd];
+    }
+}
+
+static BOOL writeBrightness(float level, int fade, BOOL commit) {
+    for (int attempt = 0; attempt < 2; attempt++) {
+        gSetLevel = level;
+        gSetAt = CFAbsoluteTimeGetCurrent();
+        BOOL result = [gClient setBrightness:level fadeSpeed:fade commit:commit forKeyboard:gKbd];
+        DIAG(@"setBrightness result=%d keyboard ID=%llu level=%.3f", result, gKbd, level);
+        if (attempt == 1) DIAG(@"setBrightness retry result=%d keyboard ID=%llu", result, gKbd);
+        if (result) return YES;
+        if (attempt == 0) refreshKeyboard();
+    }
+    return NO;
+}
+
+static BOOL setLevel(float level, int fade_ms) {
+    return writeBrightness(level, fade_ms, NO);
+}
+
 static BOOL shouldLight(void) {
     if (!gAmbientEnabled) return YES;
     double lux = ambientLux();
     return lux < 0 || lux <= gLuxLimit;  // no sensor reading: behave as if dark
 }
 
-static void setLevel(float level, int fade_ms) {
-    gSetLevel = level;
-    gSetAt = CFAbsoluteTimeGetCurrent();
-    [gClient setBrightness:level fadeSpeed:fade_ms commit:NO forKeyboard:gKbd];
+#ifdef NIGHTKEYS_DIAGNOSTIC_LOG
+static BOOL diagnosticSessionShouldLight(void) {
+    double lux = ambientLux();
+    BOOL light = gLevel > 0.01f && (!gAmbientEnabled || lux < 0 || lux <= gLuxLimit);
+    DIAG(@"key session start category=%@ AggregatedLux=%.3f threshold=%.3f ambient enabled=%d level=%.3f decision=%@",
+         gDiagnosticCategory, lux, gLuxLimit, gAmbientEnabled, gLevel, light ? @"light" : @"stay off");
+    return light;
 }
+#endif
 
 static void lightOff(void) {
+    DIAG(@"lightOff");
     float cur = [gClient brightnessForKeyboard:gKbd];
     if (cur > 0.01f && fabsf(cur - gLevel) > 0.01f) {  // the user adjusted it while lit: remember it
         gLevel = cur;
@@ -158,6 +217,7 @@ static void armTimer(double seconds) {
 }
 
 static void timerFired(void) {
+    DIAG(@"timer fired");
     double remaining = gTimeout - (CFAbsoluteTimeGetCurrent() - gLastKey);
     if (remaining > 0.05) { armTimer(remaining); return; }
     gSession = NO;
@@ -167,13 +227,16 @@ static void timerFired(void) {
 // During a long typing session the room may get brighter or darker: follow it.
 static void recheckAmbient(void) {
     gLuxCheckedAt = gLastKey;
-    if (!gAmbientEnabled || gLevel <= 0.01f) return;
+    if (!gAmbientEnabled || gLevel <= 0.01f) {
+        DIAG(@"recheckAmbient result=skipped ambient enabled=%d level=%.3f", gAmbientEnabled, gLevel);
+        return;
+    }
     BOOL light = shouldLight();
+    DIAG(@"recheckAmbient result=%@", light ? @"light" : @"stay off");
     if (gLit && !light) {
         lightOff();
     } else if (!gLit && light) {
-        setLevel(gLevel, kFadeInMs);
-        gLit = YES;
+        gLit = setLevel(gLevel, kFadeInMs);
     }
 }
 
@@ -187,9 +250,8 @@ static void keyActivity(void) {
     }
     gSession = YES;
     gLuxCheckedAt = gLastKey;
-    if (gLevel > 0.01f && shouldLight()) {
-        setLevel(gLevel, kFadeInMs);
-        gLit = YES;
+    if (SESSION_SHOULD_LIGHT()) {
+        gLit = setLevel(gLevel, kFadeInMs);
     }
     armTimer(gTimeout);
 }
@@ -204,6 +266,7 @@ static void systemSettingChanged(NSString *key, id value) {
     } else if ([key isEqualToString:CB_BRIGHTNESS]) {
         float level = [value floatValue];
         BOOL ours = fabsf(level - gSetLevel) < 0.01f || CFAbsoluteTimeGetCurrent() - gSetAt < (kFadeOutMs + 200) / 1000.0;
+        DIAG(@"brightness change value=%.3f %@", level, ours ? @"own" : @"external");
         if (ours) return;
         // The user picked a brightness: use it from now on, and keep it visible for a full timeout.
         // 0 means the user wants the light off, so typing must not turn it on either.
@@ -225,16 +288,50 @@ static void hidCallback(void *ctx, IOReturn result, void *sender, IOHIDValueRef 
     // 0x07 regular keys (0-3 are error/rollover codes), 0x0C media keys, 0xFF/0xFF00 fn key
     if ((page == kHIDPage_KeyboardOrKeypad && usage > 3 && usage != 0xFFFFFFFF) ||
         page == kHIDPage_Consumer || ((page == 0xFF || page == 0xFF00) && usage == 0x03))
+    {
+        DIAG_CATEGORY(page == kHIDPage_KeyboardOrKeypad ? @"keyboard key" :
+                      page == kHIDPage_Consumer ? @"media key" : @"fn");
         keyActivity();
+    }
 }
 
+#ifdef NIGHTKEYS_DIAGNOSTIC_LOG
+static void keyboardMatched(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef device) {
+    DIAG(@"built-in keyboard device matched");
+}
+
+static void keyboardRemoved(void *ctx, IOReturn result, void *sender, IOHIDDeviceRef device) {
+    DIAG(@"built-in keyboard device removed");
+}
+#endif
+
 // After sleep the system may restore its own backlight state; take control back.
+static void backlightDidWake(void) {
+    refreshKeyboard();
+    [gClient suspendIdleDimming:YES forKeyboard:gKbd];
+    if (!gLit) setLevel(0, 0);
+}
+
+static void registerDisplayWakeNotification(NSNotificationCenter *center) {
+    [center addObserverForName:NSWorkspaceScreensDidWakeNotification object:nil queue:NSOperationQueue.mainQueue
+                   usingBlock:^(NSNotification *note) {
+        DIAG(@"display wake");
+        backlightDidWake();
+    }];
+#ifdef NIGHTKEYS_DIAGNOSTIC_LOG
+    [center addObserverForName:NSWorkspaceScreensDidSleepNotification object:nil queue:NSOperationQueue.mainQueue
+                   usingBlock:^(NSNotification *note) { DIAG(@"display sleep"); }];
+#endif
+}
+
 static void powerCallback(void *ref, io_service_t service, natural_t msg, void *arg) {
+    if (msg == kIOMessageSystemWillSleep) DIAG(@"power will sleep");
+    else if (msg == kIOMessageSystemHasPoweredOn) DIAG(@"power has powered on");
+    else DIAG(@"power message 0x%x", msg);
     if (msg == kIOMessageCanSystemSleep || msg == kIOMessageSystemWillSleep) {
         IOAllowPowerChange(gPMRoot, (long)arg);
     } else if (msg == kIOMessageSystemHasPoweredOn) {
-        [gClient suspendIdleDimming:YES forKeyboard:gKbd];
-        if (!gLit) setLevel(0, 0);
+        backlightDidWake();
     }
 }
 
@@ -244,7 +341,7 @@ static void giveBackControl(void) {
     float cur = gLit ? [gClient brightnessForKeyboard:gKbd] : 0;
     gSetLevel = cur > 0.01f ? cur : gLevel;
     gSetAt = CFAbsoluteTimeGetCurrent();
-    [gClient setBrightness:gSetLevel fadeSpeed:kFadeInMs commit:YES forKeyboard:gKbd];
+    writeBrightness(gSetLevel, kFadeInMs, YES);
     [gClient suspendIdleDimming:NO forKeyboard:gKbd];
 }
 
@@ -357,10 +454,7 @@ static void start(void) {
     Class cls = NSClassFromString(@"KeyboardBrightnessClient");
     if (!cls) exit(2);
     gClient = [cls new];
-    BOOL found = NO;
-    for (NSNumber *n in [gClient copyKeyboardBacklightIDs]) {
-        if ([gClient isKeyboardBuiltIn:n.unsignedLongLongValue]) { gKbd = n.unsignedLongLongValue; found = YES; break; }
-    }
+    BOOL found = builtInKeyboardID(&gKbd);
     if (!found) {
         publishStatus(YES, NO);
         fprintf(stderr, "nightkeysd: no built-in backlit keyboard found\n");
@@ -376,6 +470,10 @@ static void start(void) {
         @kIOHIDBuiltInKey: @YES,
     });
     IOHIDManagerRegisterInputValueCallback(hid, hidCallback, NULL);
+#ifdef NIGHTKEYS_DIAGNOSTIC_LOG
+    IOHIDManagerRegisterDeviceMatchingCallback(hid, keyboardMatched, NULL);
+    IOHIDManagerRegisterDeviceRemovalCallback(hid, keyboardRemoved, NULL);
+#endif
     IOHIDManagerScheduleWithRunLoop(hid, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
     IOReturn r = IOHIDManagerOpen(hid, kIOHIDOptionsTypeNone);
     if (r != kIOReturnSuccess) { fprintf(stderr, "nightkeysd: could not open keyboard (0x%x)\n", r); exit(1); }
@@ -383,9 +481,7 @@ static void start(void) {
     loadSettings();
     gTimeout = [gClient idleDimTimeForKeyboard:gKbd];
     gAmbientEnabled = [gClient isAutoBrightnessEnabledForKeyboard:gKbd];
-    [gClient registerNotificationForKeys:@[ CB_IDLE_DIM_TIME, CB_AUTO_BRIGHTNESS, CB_BRIGHTNESS ] keyboardID:gKbd block:^(id key, id value) {
-        dispatch_async(dispatch_get_main_queue(), ^{ systemSettingChanged(key, value); });
-    }];
+    registerKeyboardNotifications();
     CFNotificationCenterAddObserver(CFNotificationCenterGetDistributedCenter(), NULL, settingsChanged,
                                     SETTINGS_CHANGED_NOTIFICATION, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
     CFNotificationCenterAddObserver(CFNotificationCenterGetDistributedCenter(), NULL, verifyRequested,
@@ -416,6 +512,8 @@ static void start(void) {
     gPMRoot = IORegisterForSystemPower(NULL, &pmPort, powerCallback, &pmNotifier);
     if (gPMRoot) CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(pmPort), kCFRunLoopCommonModes);
 
+    registerDisplayWakeNotification(NSWorkspace.sharedWorkspace.notificationCenter);
+
     int sigs[] = { SIGINT, SIGTERM, SIGHUP };
     for (int i = 0; i < 3; i++) {
         int sig = sigs[i];
@@ -438,6 +536,9 @@ int main(int argc, char **argv) {
             }
             return updaterRun(force, install);
         }
+#ifdef NIGHTKEYS_DIAGNOSTIC_LOG
+        if (argc > 1 && !strcmp(argv[1], "--log")) return diagnosticPrint();
+#endif
         dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_NOW);
         gDisplay = [NSClassFromString(@"DisplayServicesClient") new];
         if (argc > 1 && !strcmp(argv[1], "--status")) {  // for scripts and debugging
@@ -447,6 +548,11 @@ int main(int argc, char **argv) {
         if (argc > 1 && !strcmp(argv[1], "--check"))  // fresh permission check, see permissionStillGranted()
             return IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted ? 0 : 1;
 
+#ifdef NIGHTKEYS_DIAGNOSTIC_LOG
+        DIAG(@"agent start");
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDistributedCenter(), NULL, diagnosticRequested,
+                                        LOG_REQUEST, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+#endif
         watchAppBundle();
         if (IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted) {
             start();
