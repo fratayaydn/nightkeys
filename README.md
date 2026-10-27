@@ -15,8 +15,9 @@ or typing on an external keyboard no longer wakes the light. When you stop typin
 in **System Settings > Keyboard**.
 
 - Optionally stays off in bright rooms, using the ambient light sensor and a threshold you pick
-- Uses the timeout, low-light mode and brightness from **System Settings > Keyboard**, so a change in either place
-  shows up in both
+- Uses the timeout and low-light mode from **System Settings > Keyboard**, so changes show up in both places
+- Changes you make with the brightness keys, Control Center or System Settings are kept; changes macOS makes
+  by itself around sleep or lock are undone.
 - About 3 MB of memory and no CPU while idle; it sleeps until you press a key (see [Footprint](#footprint))
 
 ## Requirements
@@ -53,7 +54,7 @@ again from Applications or Spotlight.
 | Setting | Where it lives |
 | --- | --- |
 | Turn off after (5 s … 5 min, Never) | macOS: "Turn keyboard backlight off after inactivity" |
-| Brightness | macOS keyboard brightness (also Control Center) |
+| Brightness | NightKeys or macOS |
 | Stay off in bright rooms | macOS: "Adjust keyboard brightness in low light" |
 | Bright above (lux threshold) | NightKeys only |
 
@@ -102,7 +103,7 @@ If you allow or remove it while the window is open, click **Check Again**.
   gives control back to macOS.
 - It reads the ambient light sensor through the private `DisplayServices` framework only while you type: when a
   typing session starts and at most every 15 seconds during it, never on a timer.
-- `CoreBrightness` change notifications keep it in sync with System Settings.
+- `CoreBrightness` change notifications keep the timeout and low-light mode in sync with System Settings.
 - `NightKeys.app/Contents/MacOS/NightKeys` is the SwiftUI settings window. It runs only while open.
 - The agent watches its app bundle through the kernel's event queue (no polling): when the app is replaced by
   an update it restarts with the new version, and when the app is moved to the Trash it quits for good.

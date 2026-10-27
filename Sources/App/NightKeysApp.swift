@@ -1,7 +1,7 @@
 // NightKeys.app: settings window for the nightkeysd background agent.
 // Runs only while the window is open; the agent does the actual work.
-// Timeout, low-light mode and brightness are the macOS settings themselves (System Settings > Keyboard),
-// so changes made here or there show up in both places.
+// Timeout and low-light mode use the macOS settings (System Settings > Keyboard).
+// The window owns the level used for each typing session.
 import ServiceManagement
 import SwiftUI
 import UserNotifications
@@ -108,7 +108,17 @@ let currentBuildID = Bundle.main.object(forInfoDictionaryKey: "NTBuildID") as? S
 
 /// The brightness keys change keyboard brightness by 1/16; the buttons at the ends of the slider do the same.
 let brightnessStep = 1.0 / 16
-let userBrightnessKey = "StatusUserBrightness"  // the level the user picked, published by the agent
+let levelKey = "Level"
+let legacyBrightnessKey = "StatusUserBrightness"  // read-only migration source
+
+func readLevel(from defaults: UserDefaults) -> Double {
+    if let level = defaults.object(forKey: levelKey) as? Double { return min(max(level, 0), 1) }
+    let legacy = defaults.double(forKey: legacyBrightnessKey)
+    let level = legacy > 0.01 ? min(legacy, 1) : 0.5
+    defaults.set(level, forKey: levelKey)
+    defaults.synchronize()
+    return level
+}
 
 /// The same choices System Settings offers; 0 means never.
 let timeoutChoices: [(seconds: Double, label: String)] = [
@@ -119,7 +129,6 @@ final class Model: ObservableObject {
     @Published var idleDimTime = 10.0
     @Published var lowLightMode = true
     @Published var brightness = 0.5
-    private var brightnessSetAt = Date.distantPast  // to ignore the echo of our own brightness changes
     @Published var thresholdLux = defaultThresholdLux
     @Published var ambientLux = -1.0
     @Published var agentStatus = SMAppService.Status.notRegistered
@@ -132,18 +141,30 @@ final class Model: ObservableObject {
     @Published var lastUpdateCheck: Date?
     let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
 
-    let hasKeyboard = NTHasBacklitKeyboard()
+    let hasKeyboard: Bool
     // The app's bundle identifier is prefsDomain, so its standard defaults are the domain the agent reads.
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
+    private let previewBrightness: (Float) -> Void
+    private let settingsChanged: () -> Void
     private let agent = SMAppService.agent(plistName: agentPlistName)
     private var luxTimer: Timer?
 
-    init() {
+    init(defaults: UserDefaults = .standard, startObserving: Bool = true,
+         previewBrightness: @escaping (Float) -> Void = NTSetBrightness,
+         settingsChanged: @escaping () -> Void = {
+             DistributedNotificationCenter.default().postNotificationName(
+                 settingsChangedNotification, object: nil, deliverImmediately: true)
+         }) {
+        self.defaults = defaults
+        self.previewBrightness = previewBrightness
+        self.settingsChanged = settingsChanged
+        hasKeyboard = startObserving && NTHasBacklitKeyboard()
+        brightness = readLevel(from: defaults)
+        guard startObserving else { return }
         reregisterAfterUpdate()
         readSystemSettings()
         readAgentState()
         readUpdateState()
-        if let level = defaults.object(forKey: userBrightnessKey) as? Double { brightness = level }
         let stored = defaults.double(forKey: thresholdKey)
         thresholdLux = stored > 0 ? stored : defaultThresholdLux
         NTObserveSystemSettings { [weak self] in self?.readSystemSettings() }
@@ -162,16 +183,13 @@ final class Model: ObservableObject {
     func readSystemSettings() {
         idleDimTime = NTIdleDimTime()
         lowLightMode = NTAutoBrightness()
-        // Our own change comes back as a notification, first with in-between values of the fade: ignore it briefly.
-        let level = Double(NTBrightness())
-        let ownChangeEcho = Date().timeIntervalSince(brightnessSetAt) < 1
-        if level > 0.01 && !ownChangeEcho { brightness = level }  // 0: the light is just off
     }
 
     func readAgentState() {
         agentStatus = agent.status
         defaults.synchronize()
         permissionGranted = defaults.object(forKey: permissionKey) as? Bool
+        brightness = readLevel(from: defaults)
     }
 
     /// launchd only starts the agent build that was registered (its code signature is part of the launch
@@ -261,15 +279,17 @@ final class Model: ObservableObject {
     func setBrightness(_ level: Double) {
         let level = min(max(level, 0), 1)
         brightness = level
-        brightnessSetAt = Date()
-        NTSetBrightness(Float(level))
+        defaults.set(level, forKey: levelKey)
+        defaults.synchronize()
+        settingsChanged()
+        previewBrightness(Float(level))
     }
 
     func setThreshold(_ lux: Double) {
         thresholdLux = lux
         defaults.set(lux, forKey: thresholdKey)
         defaults.synchronize()
-        DistributedNotificationCenter.default().postNotificationName(settingsChangedNotification, object: nil, deliverImmediately: true)
+        settingsChanged()
     }
 
     var isEnabled: Bool { agentStatus == .enabled || agentStatus == .requiresApproval }
@@ -283,8 +303,7 @@ final class Model: ObservableObject {
         // The agent gives control back when it stops, but it may not have been running (e.g. still waiting for
         // permission), so make sure here: macOS's idle timer runs again and the light is at the user's level.
         if !on {
-            let level = brightness > 0.01 ? brightness : 0.5
-            brightness = level
+            let level = brightness > 0 ? brightness : 0.5
             NTGiveControlToMacOS(Float(level))
         }
         readAgentState()

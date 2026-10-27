@@ -5,11 +5,11 @@
 // Settings that macOS already has are used directly, so System Settings > Keyboard and NightKeys.app stay in sync:
 //   - "Turn keyboard backlight off after inactivity"  -> how long the light stays on after the last key
 //   - "Adjust keyboard brightness in low light"        -> stay off when the room is bright
-//   - keyboard brightness (System Settings, Control Center) -> the level the light turns on at
-// CoreBrightness notifies us when any of them changes. The only NightKeys-specific setting, the lux threshold,
-// lives in the "io.github.fratayaydn.nightkeys" preferences domain; NightKeys.app posts SETTINGS_CHANGED_NOTIFICATION.
+// CoreBrightness notifies us when these settings change. The level and lux threshold live in the
+// "io.github.fratayaydn.nightkeys" preferences domain; NightKeys.app posts SETTINGS_CHANGED_NOTIFICATION.
 #import <Foundation/Foundation.h>
 #import <AppKit/NSWorkspace.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import "Updater.h"
 #import <IOKit/hid/IOHIDManager.h>
 #import <IOKit/hidsystem/IOHIDLib.h>
@@ -30,7 +30,8 @@ extern char **environ;
 #define STATUS_CHANGED_NOTIFICATION   CFSTR("io.github.fratayaydn.nightkeys.StatusChanged")
 #define VERIFY_NOTIFICATION           CFSTR("io.github.fratayaydn.nightkeys.VerifyPermission")
 
-// NightKeys's own setting (written by the app).
+// NightKeys settings (Level is also saved after manual macOS adjustments).
+#define KEY_LEVEL            CFSTR("Level")
 #define KEY_AMBIENT_LUX      CFSTR("AmbientThresholdLux")  // "bright" means above this
 #define DEFAULT_AMBIENT_LUX  3.0
 #define DEFAULT_TIMEOUT      10.0
@@ -43,7 +44,7 @@ extern char **environ;
 // Status keys (written by the agent, shown by the app).
 #define KEY_STATUS_PERMISSION CFSTR("StatusInputMonitoringGranted")
 #define KEY_STATUS_KEYBOARD   CFSTR("StatusKeyboardFound")
-#define KEY_STATUS_LEVEL      CFSTR("StatusUserBrightness")  // the level the user picked (0 = keep the light off)
+#define KEY_STATUS_LEVEL      CFSTR("StatusUserBrightness")  // read-only legacy value for migration
 
 @interface NSObject (KeyboardBrightnessClient)
 - (id)copyKeyboardBacklightIDs;
@@ -51,7 +52,6 @@ extern char **environ;
 - (double)idleDimTimeForKeyboard:(unsigned long long)k;
 - (BOOL)isAutoBrightnessEnabledForKeyboard:(unsigned long long)k;
 - (void)registerNotificationForKeys:(NSArray *)keys keyboardID:(unsigned long long)k block:(void (^)(id key, id value))block;
-- (float)brightnessForKeyboard:(unsigned long long)k;
 - (BOOL)setBrightness:(float)b fadeSpeed:(int)f commit:(BOOL)c forKeyboard:(unsigned long long)k;
 - (BOOL)suspendIdleDimming:(BOOL)s forKeyboard:(unsigned long long)k;
 @end
@@ -76,6 +76,7 @@ static double gLuxLimit = DEFAULT_AMBIENT_LUX;
 static id gClient, gDisplay;
 static unsigned long long gKbd;
 static float gLevel = 0.5;          // user's brightness level
+static float gPreferencesLevel = 0.5;  // last Level read or written, separate from a pending manual ramp
 static BOOL gLit = NO;              // is the light currently on
 static BOOL gSession = NO;          // is a typing session active (< gTimeout since last key)
 static CFAbsoluteTime gLastKey;
@@ -83,11 +84,90 @@ static CFAbsoluteTime gLuxCheckedAt;  // when the light sensor was last read for
 static float gSetLevel = -1;        // brightness we set last, to recognize our own change notifications
 static CFAbsoluteTime gSetAt = 0;
 static dispatch_source_t gTimer;
+static CFAbsoluteTime gLastTransition, gLastBrightnessKey;
+static BOOL gManualPending;
+static float gManualLevel;
+static CFAbsoluteTime gManualAt;
+static dispatch_source_t gManualTimer;
 static io_connect_t gPMRoot;
 static dispatch_source_t gBundleWatch;
 static char gExecutable[PATH_MAX];  // our path inside NightKeys.app, to see if a new copy replaced it
 
 #pragma mark - Settings and status
+
+typedef enum {
+    BrightnessManualLevel, BrightnessManualKey, BrightnessManualNormal,
+    BrightnessAutomaticDisplay, BrightnessAutomaticLock, BrightnessAutomaticTransition
+} BrightnessClass;
+
+// No system calls or mutable state: the key window takes priority over transition guards.
+static BrightnessClass classifyBrightness(double now, double lastKey, double lastTransition,
+                                           BOOL displayAsleep, BOOL screenLocked) {
+    if (lastKey > 0 && now >= lastKey && now - lastKey <= 3) return BrightnessManualKey;
+    if (displayAsleep) return BrightnessAutomaticDisplay;
+    if (screenLocked) return BrightnessAutomaticLock;
+    if (now - lastTransition <= 10) return BrightnessAutomaticTransition;
+    return BrightnessManualNormal;
+}
+
+static BOOL sameBrightnessRamp(double now, double previous) {
+    return now >= previous && now - previous <= 1;
+}
+
+static BOOL illuminationKey(uint32_t page, uint32_t usage) {
+    // Consumer keyboard illumination, and AppleVendorTopCase IlluminationUp/Down.
+    // Display brightness (consumer 0x6f/0x70) is deliberately excluded.
+    return (page == kHIDPage_Consumer && (usage == 0x79 || usage == 0x7a))
+        || (page == 0xff && (usage == 0x08 || usage == 0x09));
+}
+
+static BOOL noteBrightnessKey(uint32_t page, uint32_t usage, CFIndex pressed) {
+    BOOL brightness = illuminationKey(page, usage);
+    if (brightness && pressed > 0) gLastBrightnessKey = CFAbsoluteTimeGetCurrent();
+    return brightness;
+}
+
+static void cancelManualSave(void) {
+    gManualPending = NO;
+    if (gManualTimer)
+        dispatch_source_set_timer(gManualTimer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
+}
+
+static void saveManualLevel(void) {
+    if (!gManualPending) return;
+    float level = gManualLevel;
+    cancelManualSave();
+    CFNumberRef value = CFNumberCreate(NULL, kCFNumberFloatType, &level);
+    CFPreferencesSetAppValue(KEY_LEVEL, value, PREFS_DOMAIN);
+    CFRelease(value);
+    CFPreferencesAppSynchronize(PREFS_DOMAIN);
+    gPreferencesLevel = level;
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDistributedCenter(),
+                                         STATUS_CHANGED_NOTIFICATION, NULL, NULL, true);
+}
+
+static void manualTimerFired(void) {
+    if (!gManualPending) return;
+    double remaining = 1 - (CFAbsoluteTimeGetCurrent() - gManualAt);
+    if (remaining > 0) {
+        dispatch_source_set_timer(gManualTimer,
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(remaining * NSEC_PER_SEC)), DISPATCH_TIME_FOREVER, 0);
+    } else saveManualLevel();
+}
+
+static void queueManualLevel(float level, CFAbsoluteTime now) {
+    if (gManualPending && !sameBrightnessRamp(now, gManualAt)) saveManualLevel();
+    gManualPending = YES;
+    gManualLevel = level;
+    gManualAt = now;
+    if (!gManualTimer) {
+        gManualTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+        dispatch_source_set_event_handler(gManualTimer, ^{ manualTimerFired(); });
+        dispatch_resume(gManualTimer);
+    }
+    dispatch_source_set_timer(gManualTimer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
+                              DISPATCH_TIME_FOREVER, 0);
+}
 
 static double prefDouble(CFStringRef key, double fallback, double min, double max) {
     CFPropertyListRef v = CFPreferencesCopyAppValue(key, PREFS_DOMAIN);
@@ -97,9 +177,22 @@ static double prefDouble(CFStringRef key, double fallback, double min, double ma
     return d < min ? min : d > max ? max : d;
 }
 
+// Until the window persists the migration, use the same fallback without writing preferences here.
+static float readLevel(void) {
+    CFPropertyListRef value = CFPreferencesCopyAppValue(KEY_LEVEL, PREFS_DOMAIN);
+    if (value) {
+        CFRelease(value);
+        return (float)prefDouble(KEY_LEVEL, 0.5, 0, 1);
+    }
+    double legacy = prefDouble(KEY_STATUS_LEVEL, 0.5, 0, 1);
+    return legacy > 0.01 ? (float)legacy : 0.5f;
+}
+
 static void loadSettings(void) {
     CFPreferencesAppSynchronize(PREFS_DOMAIN);
     gLuxLimit = prefDouble(KEY_AMBIENT_LUX, DEFAULT_AMBIENT_LUX, 0, 100000);
+    gLevel = gPreferencesLevel = readLevel();
+    DIAG(@"preferences Level=%.3f", gLevel);
 }
 
 static void publishStatus(BOOL permission, BOOL keyboard) {
@@ -107,18 +200,6 @@ static void publishStatus(BOOL permission, BOOL keyboard) {
     CFPreferencesSetAppValue(KEY_STATUS_KEYBOARD, keyboard ? kCFBooleanTrue : kCFBooleanFalse, PREFS_DOMAIN);
     CFPreferencesAppSynchronize(PREFS_DOMAIN);
     CFNotificationCenterPostNotification(CFNotificationCenterGetDistributedCenter(), STATUS_CHANGED_NOTIFICATION, NULL, NULL, true);
-}
-
-// Let NightKeys.app show the user's level even while the light is off.
-static void publishLevel(float level) {
-    CFNumberRef n = CFNumberCreate(NULL, kCFNumberFloatType, &level);
-    CFPreferencesSetAppValue(KEY_STATUS_LEVEL, n, PREFS_DOMAIN);
-    CFRelease(n);
-    CFPreferencesAppSynchronize(PREFS_DOMAIN);
-}
-
-static void settingsChanged(CFNotificationCenterRef c, void *observer, CFNotificationName name, const void *object, CFDictionaryRef info) {
-    loadSettings();
 }
 
 #pragma mark - Light control
@@ -189,7 +270,7 @@ static BOOL shouldLight(void) {
 #ifdef NIGHTKEYS_DIAGNOSTIC_LOG
 static BOOL diagnosticSessionShouldLight(void) {
     double lux = ambientLux();
-    BOOL light = gLevel > 0.01f && (!gAmbientEnabled || lux < 0 || lux <= gLuxLimit);
+    BOOL light = gLevel > 0 && (!gAmbientEnabled || lux < 0 || lux <= gLuxLimit);
     DIAG(@"key session start category=%@ AggregatedLux=%.3f threshold=%.3f ambient enabled=%d level=%.3f decision=%@",
          gDiagnosticCategory, lux, gLuxLimit, gAmbientEnabled, gLevel, light ? @"light" : @"stay off");
     return light;
@@ -198,11 +279,6 @@ static BOOL diagnosticSessionShouldLight(void) {
 
 static void lightOff(void) {
     DIAG(@"lightOff");
-    float cur = [gClient brightnessForKeyboard:gKbd];
-    if (cur > 0.01f && fabsf(cur - gLevel) > 0.01f) {  // the user adjusted it while lit: remember it
-        gLevel = cur;
-        publishLevel(gLevel);
-    }
     setLevel(0, kFadeOutMs);
     gLit = NO;
 }
@@ -216,6 +292,47 @@ static void armTimer(double seconds) {
                               DISPATCH_TIME_FOREVER, 200 * NSEC_PER_MSEC);
 }
 
+static void startManualSession(float level, CFAbsoluteTime now) {
+    gLastKey = gLuxCheckedAt = now;
+    gSession = YES;
+    gLit = level > 0;
+    armTimer(gTimeout);
+}
+
+static void settingsChanged(CFNotificationCenterRef c, void *observer, CFNotificationName name, const void *object, CFDictionaryRef info) {
+    float previous = gLevel, previousPreference = gPreferencesLevel;
+    cancelManualSave();  // The window's newer direct write wins over a pending external ramp.
+    loadSettings();
+    if (gLevel == previousPreference && gLevel == previous) return;
+    float preview = gLevel > 0.01f ? gLevel : 0;
+    BOOL lit = setLevel(preview, kFadeInMs);
+    startManualSession(preview, CFAbsoluteTimeGetCurrent());
+    gLit = preview > 0 && lit;
+}
+
+static BOOL displayIsAsleep(void) {
+    CGDirectDisplayID main = CGMainDisplayID();
+    BOOL asleep = CGDisplayIsAsleep(main);
+    if (CGDisplayIsBuiltin(main)) return asleep;
+    // Include sleeping and mirrored built-in displays when an external display is primary.
+    uint32_t count = 0;
+    if (CGGetOnlineDisplayList(0, NULL, &count) != kCGErrorSuccess || !count) return asleep;
+    CGDirectDisplayID *displays = calloc(count, sizeof(*displays));
+    if (!displays) return asleep;
+    if (CGGetOnlineDisplayList(count, displays, &count) == kCGErrorSuccess) {
+        for (uint32_t i = 0; i < count; i++) {
+            if (CGDisplayIsBuiltin(displays[i]) && CGDisplayIsAsleep(displays[i])) asleep = YES;
+        }
+    }
+    free(displays);
+    return asleep;
+}
+
+static BOOL screenIsLocked(void) {
+    NSDictionary *session = CFBridgingRelease(CGSessionCopyCurrentDictionary());
+    return [session[@"CGSSessionScreenIsLocked"] boolValue];
+}
+
 static void timerFired(void) {
     DIAG(@"timer fired");
     double remaining = gTimeout - (CFAbsoluteTimeGetCurrent() - gLastKey);
@@ -227,7 +344,7 @@ static void timerFired(void) {
 // During a long typing session the room may get brighter or darker: follow it.
 static void recheckAmbient(void) {
     gLuxCheckedAt = gLastKey;
-    if (!gAmbientEnabled || gLevel <= 0.01f) {
+    if (!gAmbientEnabled || gLevel <= 0) {
         DIAG(@"recheckAmbient result=skipped ambient enabled=%d level=%.3f", gAmbientEnabled, gLevel);
         return;
     }
@@ -265,19 +382,43 @@ static void systemSettingChanged(NSString *key, id value) {
         gAmbientEnabled = [value boolValue];
     } else if ([key isEqualToString:CB_BRIGHTNESS]) {
         float level = [value floatValue];
-        BOOL ours = fabsf(level - gSetLevel) < 0.01f || CFAbsoluteTimeGetCurrent() - gSetAt < (kFadeOutMs + 200) / 1000.0;
-        DIAG(@"brightness change value=%.3f %@", level, ours ? @"own" : @"external");
+        if (!isfinite(level)) return;
+        level = fminf(fmaxf(level, 0), 1);
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        BOOL ours = fabsf(level - gSetLevel) < 0.0001f
+            && now - gSetAt <= (kFadeOutMs + 200) / 1000.0;
         if (ours) return;
-        // The user picked a brightness: use it from now on, and keep it visible for a full timeout.
-        // 0 means the user wants the light off, so typing must not turn it on either.
-        gLevel = level;
-        publishLevel(gLevel);
-        if (level > 0.01f) {
-            gLit = gSession = YES;
-            gLastKey = CFAbsoluteTimeGetCurrent();
-            armTimer(gTimeout);
+        // The window saves Level before sending either notification. Observe that write even if
+        // CoreBrightness reaches us before the distributed settings notification.
+        CFPreferencesAppSynchronize(PREFS_DOMAIN);
+        if (readLevel() != gPreferencesLevel) settingsChanged(NULL, NULL, NULL, NULL, NULL);
+        now = CFAbsoluteTimeGetCurrent();
+        BOOL matchesLevel = fabsf(level - gLevel) <= 0.01f;
+        BOOL displayAsleep = displayIsAsleep(), screenLocked = screenIsLocked();
+        BrightnessClass classification = matchesLevel ? BrightnessManualLevel
+            : classifyBrightness(now, gLastBrightnessKey, gLastTransition, displayAsleep, screenLocked);
+        BOOL manual = classification == BrightnessManualLevel || classification == BrightnessManualKey
+            || classification == BrightnessManualNormal;
+#ifdef NIGHTKEYS_DIAGNOSTIC_LOG
+        NSString *reason = classification == BrightnessManualLevel ? @"matches configured Level"
+            : classification == BrightnessManualKey ? @"brightness key within 3 seconds"
+            : classification == BrightnessManualNormal ? @"awake and unlocked for more than 10 seconds"
+            : classification == BrightnessAutomaticDisplay ? @"display asleep"
+            : classification == BrightnessAutomaticLock ? @"screen locked" : @"transition within 10 seconds";
+        DIAG(@"external brightness value=%.3f class=%@ reason=%@ live display asleep=%d screen locked=%d",
+             level, manual ? @"manual" : @"automatic", reason, displayAsleep, screenLocked);
+#endif
+        if (manual) {
+            if (!matchesLevel) {
+                queueManualLevel(level, now);
+                gLevel = level;
+            }
+            startManualSession(level, now);
         } else {
-            gLit = NO;
+            float restore = gSession && gLit ? gLevel : 0;
+            DIAG(@"external brightness restore action=%@ level=%.3f",
+                 gSession && gLit ? @"saved level" : @"keep dark", restore);
+            setLevel(restore, 0);
         }
     }
 }
@@ -285,9 +426,10 @@ static void systemSettingChanged(NSString *key, id value) {
 static void hidCallback(void *ctx, IOReturn result, void *sender, IOHIDValueRef value) {
     IOHIDElementRef el = IOHIDValueGetElement(value);
     uint32_t page = IOHIDElementGetUsagePage(el), usage = IOHIDElementGetUsage(el);
+    BOOL brightness = noteBrightnessKey(page, usage, IOHIDValueGetIntegerValue(value));
     // 0x07 regular keys (0-3 are error/rollover codes), 0x0C media keys, 0xFF/0xFF00 fn key
     if ((page == kHIDPage_KeyboardOrKeypad && usage > 3 && usage != 0xFFFFFFFF) ||
-        page == kHIDPage_Consumer || ((page == 0xFF || page == 0xFF00) && usage == 0x03))
+        page == kHIDPage_Consumer || brightness || ((page == 0xFF || page == 0xFF00) && usage == 0x03))
     {
         DIAG_CATEGORY(page == kHIDPage_KeyboardOrKeypad ? @"keyboard key" :
                       page == kHIDPage_Consumer ? @"media key" : @"fn");
@@ -312,16 +454,29 @@ static void backlightDidWake(void) {
     if (!gLit) setLevel(0, 0);
 }
 
+static void noteTransition(void) {
+    saveManualLevel();
+    gLastTransition = CFAbsoluteTimeGetCurrent();
+}
+
+static void screenLockChanged(CFNotificationCenterRef center, void *observer, CFNotificationName name,
+                              const void *object, CFDictionaryRef info) {
+    noteTransition();
+    DIAG(@"screen %@", CFEqual(name, CFSTR("com.apple.screenIsLocked")) ? @"lock" : @"unlock");
+}
+
 static void registerDisplayWakeNotification(NSNotificationCenter *center) {
     [center addObserverForName:NSWorkspaceScreensDidWakeNotification object:nil queue:NSOperationQueue.mainQueue
                    usingBlock:^(NSNotification *note) {
         DIAG(@"display wake");
+        noteTransition();
         backlightDidWake();
     }];
-#ifdef NIGHTKEYS_DIAGNOSTIC_LOG
     [center addObserverForName:NSWorkspaceScreensDidSleepNotification object:nil queue:NSOperationQueue.mainQueue
-                   usingBlock:^(NSNotification *note) { DIAG(@"display sleep"); }];
-#endif
+                   usingBlock:^(NSNotification *note) {
+        noteTransition();
+        DIAG(@"display sleep");
+    }];
 }
 
 static void powerCallback(void *ref, io_service_t service, natural_t msg, void *arg) {
@@ -329,8 +484,12 @@ static void powerCallback(void *ref, io_service_t service, natural_t msg, void *
     else if (msg == kIOMessageSystemHasPoweredOn) DIAG(@"power has powered on");
     else DIAG(@"power message 0x%x", msg);
     if (msg == kIOMessageCanSystemSleep || msg == kIOMessageSystemWillSleep) {
+        if (msg == kIOMessageSystemWillSleep) {
+            noteTransition();
+        }
         IOAllowPowerChange(gPMRoot, (long)arg);
     } else if (msg == kIOMessageSystemHasPoweredOn) {
+        noteTransition();
         backlightDidWake();
     }
 }
@@ -338,10 +497,8 @@ static void powerCallback(void *ref, io_service_t service, natural_t msg, void *
 // Hand the system its own idle timer and brightness back. The level is committed, as System Settings does:
 // an uncommitted level is dropped when this process exits, which would leave the backlight at 0.
 static void giveBackControl(void) {
-    float cur = gLit ? [gClient brightnessForKeyboard:gKbd] : 0;
-    gSetLevel = cur > 0.01f ? cur : gLevel;
-    gSetAt = CFAbsoluteTimeGetCurrent();
-    writeBrightness(gSetLevel, kFadeInMs, YES);
+    saveManualLevel();
+    writeBrightness(gLevel > 0 ? gLevel : 0.5f, kFadeInMs, YES);
     [gClient suspendIdleDimming:NO forKeyboard:gKbd];
 }
 
@@ -490,20 +647,15 @@ static void start(void) {
 
     // Suspend the system's "turn off after x sec" timer; we are in control.
     [gClient suspendIdleDimming:YES forKeyboard:gKbd];
-    float cur = [gClient brightnessForKeyboard:gKbd];
-    CFPropertyListRef saved = CFPreferencesCopyAppValue(KEY_STATUS_LEVEL, PREFS_DOMAIN);
-    if (saved && CFGetTypeID(saved) == CFNumberGetTypeID()) CFNumberGetValue(saved, kCFNumberFloatType, &gLevel);
-    else if (cur > 0.01f) gLevel = cur;
-    if (saved) CFRelease(saved);
-    publishLevel(gLevel);
-
     gTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_event_handler(gTimer, ^{ timerFired(); });
     dispatch_source_set_timer(gTimer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
     dispatch_resume(gTimer);
 
-    // Start lit; turn off when the timeout passes.
-    gLit = gSession = YES;
+    // Preview the configured level at startup; turn off when the timeout passes.
+    BOOL lit = setLevel(gLevel, kFadeInMs);
+    gLit = gLevel > 0 && lit;
+    gSession = YES;
     gLastKey = CFAbsoluteTimeGetCurrent();
     armTimer(gTimeout);
 
@@ -513,6 +665,12 @@ static void start(void) {
     if (gPMRoot) CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(pmPort), kCFRunLoopCommonModes);
 
     registerDisplayWakeNotification(NSWorkspace.sharedWorkspace.notificationCenter);
+    gLastTransition = CFAbsoluteTimeGetCurrent();
+    CFNotificationCenterRef distributed = CFNotificationCenterGetDistributedCenter();
+    CFNotificationCenterAddObserver(distributed, NULL, screenLockChanged, CFSTR("com.apple.screenIsLocked"),
+                                    NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    CFNotificationCenterAddObserver(distributed, NULL, screenLockChanged, CFSTR("com.apple.screenIsUnlocked"),
+                                    NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
 
     int sigs[] = { SIGINT, SIGTERM, SIGHUP };
     for (int i = 0; i < 3; i++) {

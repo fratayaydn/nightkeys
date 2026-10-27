@@ -1,8 +1,10 @@
 // Exercise the bounded memory log and request/reply using a private notification center.
 #include <assert.h>
-#define main agentMain
-#import "../Sources/Agent/nightkeysd.m"
-#undef main
+#import <Foundation/Foundation.h>
+
+#define BACKLIGHT_TEST_LIBRARY
+#import "backlight.m"
+#undef CFNotificationCenterPostNotification
 
 static void resetLog(void) {
     for (NSUInteger i = 0; i < 500; i++) gDiagnosticEntries[i] = nil;
@@ -65,9 +67,72 @@ static void testReply(void) {
 
 int main(void) {
     @autoreleasepool {
+        testClassification();
+        testBrightnessKeys();
+        testLevelPreferences();
+        testExternalBrightness();
+        testWindowPreview();
+        testLiveState();
+        testRetry();
+        testWake(NO);
+        testWake(YES);
+        testNotificationRecovery();
+        resetLog();
+        testTransitions();
+        NSMutableSet *events = [NSMutableSet new];
+        for (NSDictionary *entry in diagnosticRead()) [events addObject:entry[@"text"]];
+        assert([events containsObject:@"display sleep"] && [events containsObject:@"display wake"]);
+        assert([events containsObject:@"screen lock"] && [events containsObject:@"screen unlock"]);
+        assert([events containsObject:@"power will sleep"] && [events containsObject:@"power has powered on"]);
+        resetLog();
+        BacklightFixture *client = fixture();
+        gKbd = client.currentID;
+        gLevel = 0.625;
+        gSession = gLit = YES;
+        testPreferences[@"Level"] = @(gLevel);
+        gPreferencesLevel = gLevel;
+        testMainAsleep = YES;
+        testSession = @{@"CGSSessionScreenIsLocked": @NO};
+        gLastBrightnessKey = 0;
+        gSetLevel = -1;
+        gSetAt = 0;
+        systemSettingChanged(CB_BRIGHTNESS, @0);
+        NSArray *entries = diagnosticRead();
+        assert([entries[0][@"text"] isEqual:
+                @"external brightness value=0.000 class=automatic reason=display asleep live display asleep=1 screen locked=0"]);
+        assert([entries[1][@"text"] isEqual:@"external brightness restore action=saved level level=0.625"]);
+        assert(gLevel == 0.625f);
+        resetLog();
+        gLastBrightnessKey = CFAbsoluteTimeGetCurrent();
+        gTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+        dispatch_resume(gTimer);
+        systemSettingChanged(CB_BRIGHTNESS, @0.75);
+        entries = diagnosticRead();
+        assert([entries[0][@"text"] isEqual:
+                @"external brightness value=0.750 class=manual reason=brightness key within 3 seconds live display asleep=1 screen locked=0"]);
+        cancelManualSave();
+        resetLog();
+        testMainAsleep = NO;
+        testSession = @{@"CGSSessionScreenIsLocked": @YES};
+        gLastBrightnessKey = 0;
+        NSUInteger writes = client.writes.count;
+        systemSettingChanged(CB_BRIGHTNESS, @0.754);
+        entries = diagnosticRead();
+        assert(entries.count == 1 && client.writes.count == writes && !gManualPending);
+        assert([entries[0][@"text"] isEqual:
+                @"external brightness value=0.754 class=manual reason=matches configured Level live display asleep=0 screen locked=1"]);
+        dispatch_source_cancel(gTimer);
+        gTimer = nil;
+        resetLog();
+        testPreferences[@"Level"] = @0.375;
+        loadSettings();
+        entries = diagnosticRead();
+        assert(entries.count == 1 && gLevel == 0.375f);
+        assert([entries[0][@"text"] isEqual:@"preferences Level=0.375"]);
         testRing();
         testReply();
-        puts("Passed diagnostic checks: 500-entry ring, oldest-first order, expiry on add/read and correlated request/reply.");
+        puts("Passed diagnostic checks: brightness class and reason, live display/lock values, restore action, preference level, "
+             "ring and request/reply.");
     }
     return 0;
 }

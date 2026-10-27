@@ -28,11 +28,62 @@ private final class NotificationFixture {
     }
 }
 
+// Keep preference tests in memory so they never alter the installed app's domain.
+private final class LevelDefaults: UserDefaults {
+    var values: [String: Any] = [:]
+    override func object(forKey key: String) -> Any? { values[key] }
+    override func double(forKey key: String) -> Double { values[key] as? Double ?? 0 }
+    override func set(_ value: Any?, forKey key: String) { values[key] = value }
+    override func synchronize() -> Bool { true }
+}
+
+private func testLevel() {
+    for legacy: Double? in [nil, 0, 0.01, -1, 0.75, 2] {
+        let defaults = LevelDefaults()
+        defaults.values[legacyBrightnessKey] = legacy
+        let expected = (legacy ?? 0) > 0.01 ? min(legacy!, 1) : 0.5
+        precondition(readLevel(from: defaults) == expected)
+        precondition(defaults.values[levelKey] as? Double == expected)
+        defaults.values[legacyBrightnessKey] = 0.2
+        precondition(readLevel(from: defaults) == expected)
+    }
+    for level in [0.0, 0.005, 0.25, 1, -1, 2] {
+        let defaults = LevelDefaults()
+        defaults.values[levelKey] = level
+        defaults.values[legacyBrightnessKey] = 0.9
+        precondition(readLevel(from: defaults) == min(max(level, 0), 1))
+    }
+    let defaults = LevelDefaults()
+    defaults.values[levelKey] = 0.625
+    var previews: [Float] = []
+    var notifications = 0
+    let model = Model(defaults: defaults, startObserving: false, previewBrightness: { previews.append($0) },
+                      settingsChanged: { notifications += 1 })
+    precondition(model.brightness == 0.625)
+    model.readSystemSettings()
+    precondition(model.brightness == 0.625)
+    defaults.values[levelKey] = 0.75
+    model.readAgentState()
+    precondition(model.brightness == 0.75 && previews.isEmpty && notifications == 0)
+    for level in [0.25, 0, 1, -1, 2] {
+        model.setBrightness(level)
+        let expected = min(max(level, 0), 1)
+        precondition(model.brightness == expected && defaults.values[levelKey] as? Double == expected)
+        precondition(previews.last == Float(expected))
+    }
+    model.setBrightness(0.5)
+    model.setBrightness(model.brightness - brightnessStep)
+    model.setBrightness(model.brightness + brightnessStep)
+    precondition(model.brightness == 0.5 && notifications == previews.count && notifications == 8)
+    print("Passed window level checks: migration, fixed slider, persistence, notification, preview and steps.")
+}
+
 @main
 enum NotificationTests {
     @MainActor
     static func main() throws {
         precondition(NSApp == nil)
+        testLevel()
         let installed = ["--notify-update", "1.2.3", "--installed"]
         let available = ["--notify-update", "1.2.3", "--available"]
         for version in ["", "v1.2.3", "1..2", ".1", "1.", "1.2.3.4", "-1", "1-beta", "1/2", "1. 2", "\u{0661}"] {

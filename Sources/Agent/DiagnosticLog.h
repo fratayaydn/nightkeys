@@ -85,5 +85,5 @@ static int diagnosticPrint(void) {
 #else
 #define DIAG(...) ((void)0)
 #define DIAG_CATEGORY(value) ((void)0)
-#define SESSION_SHOULD_LIGHT() (gLevel > 0.01f && shouldLight())
+#define SESSION_SHOULD_LIGHT() (gLevel > 0 && shouldLight())
 #endif
