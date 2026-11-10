@@ -534,7 +534,7 @@ static BOOL permissionStillGranted(void) {
 // backlight back to macOS and start over in the "waiting for permission" state.
 static void verifyPermission(void) {
     if (permissionStillGranted()) return;
-    fprintf(stderr, "nightkeysd: Input Monitoring permission was removed\n");
+    DIAG(@"Input Monitoring permission was removed");
     giveBackControl();
     char path[PATH_MAX];
     if (!selfPath(path, sizeof(path))) exit(1);
@@ -551,7 +551,7 @@ static void unregisterLoginItem(void) {
     for (NSString *plist in @[UPDATER_PLIST, AGENT_PLIST]) {
         NSError *error = nil;
         if (![[NSClassFromString(@"SMAppService") agentServiceWithPlistName:plist] unregisterAndReturnError:&error])
-            fprintf(stderr, "nightkeysd: could not remove %s: %s\n", plist.UTF8String, error.localizedDescription.UTF8String);
+            DIAG(@"could not remove %@: %@ %ld", plist, error.domain, (long)error.code);
     }
 }
 
@@ -564,11 +564,11 @@ static void appMoved(void) {
         sleep(1);
         struct stat st;
         if (stat(gExecutable, &st) == 0) {
-            fprintf(stderr, "nightkeysd: NightKeys.app was updated, restarting\n");
+            DIAG(@"NightKeys.app was updated, restarting");
             giveBackControlAndExit(1);
         }
     }
-    fprintf(stderr, "nightkeysd: NightKeys.app was removed, exiting\n");
+    DIAG(@"NightKeys.app was removed, exiting");
     giveBackControl();
     usleep(300 * 1000);
     unregisterLoginItem();  // launchd may stop us right here; the backlight is already handed back
@@ -719,7 +719,7 @@ int main(int argc, char **argv) {
             // macOS decides Input Monitoring once per process image, so the check re-execs us; see verifyPermission().
             IOHIDRequestAccess(kIOHIDRequestTypeListenEvent);
             publishStatus(NO, NO);
-            fprintf(stderr, "nightkeysd: waiting for Input Monitoring permission (allow it in System Settings, then click Check Again in the NightKeys window)\n");
+            DIAG(@"waiting for Input Monitoring permission");
             CFNotificationCenterAddObserver(CFNotificationCenterGetDistributedCenter(), NULL, recheckRequested,
                                             VERIFY_NOTIFICATION, NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         }

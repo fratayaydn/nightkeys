@@ -38,7 +38,7 @@ AGENT_HEADERS := Sources/Agent/Updater.h Sources/Agent/DiagnosticLog.h
 APP_SRC   := Sources/App/NightKeysApp.swift
 BRIDGE    := Sources/App/NightKeysBridge
 
-.PHONY: all test clean install uninstall signing-identity release-app dmg release updater-test-agent diagnostic FORCE
+.PHONY: all test release-logging-test clean install uninstall signing-identity release-app dmg release updater-test-agent diagnostic FORCE
 
 all: $(APP)
 
@@ -85,6 +85,7 @@ install: $(APP)
 	./scripts/install.sh $(APP)
 
 release-app:
+	@if [ "$(DIAGNOSTIC_LOG)" != "0" ]; then echo "Release builds require DIAGNOSTIC_LOG=0."; exit 1; fi
 	@if [ -z "$(RELEASE_IDENTITY)" ]; then echo "Set RELEASE_IDENTITY (see the Makefile)."; exit 1; fi
 	rm -rf $(RELEASE_DIR)
 	$(MAKE) BUILD=$(RELEASE_DIR) SIGN_IDENTITY="$(RELEASE_IDENTITY)" TIMESTAMP=--timestamp DIAGNOSTIC_LOG=0 AGENT_DIAGNOSTIC_FLAGS=
@@ -109,12 +110,17 @@ clean:
 	rm -rf .build
 
 # Checks use private fixtures and simulated notifications, without changing system settings.
-test: $(BUILD)/updater-tests $(BUILD)/updater-tool-tests $(BUILD)/notification-tests $(BUILD)/backlight-tests $(BUILD)/nightkeysd-diagnostic-check $(BUILD)/diagnostic-tests
+test: $(BUILD)/updater-tests $(BUILD)/updater-tool-tests $(BUILD)/notification-tests $(BUILD)/backlight-tests $(BUILD)/nightkeysd-diagnostic-check $(BUILD)/diagnostic-tests release-logging-test
 	$(BUILD)/updater-tests
 	$(BUILD)/updater-tool-tests
 	$(BUILD)/notification-tests
 	$(BUILD)/backlight-tests
 	$(BUILD)/diagnostic-tests
+
+# Build a separate release copy without installing it or using a signing certificate.
+release-logging-test:
+	$(MAKE) BUILD=$(BUILD)/release-logging SIGN_IDENTITY=- TIMESTAMP= DIAGNOSTIC_LOG=0 AGENT_DIAGNOSTIC_FLAGS= all
+	sh Tests/release-logging.sh $(BUILD)/release-logging/NightKeys.app/Contents/MacOS/*
 
 $(BUILD)/nightkeysd-diagnostic-check: $(AGENT_SRC) $(AGENT_HEADERS)
 	mkdir -p $(BUILD)

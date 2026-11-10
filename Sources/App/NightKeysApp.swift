@@ -5,9 +5,6 @@
 import ServiceManagement
 import SwiftUI
 import UserNotifications
-import os.log
-
-private let updateLog = OSLog(subsystem: "io.github.fratayaydn.nightkeys", category: "updater")
 
 // Each callback owns its reply until completion, including after a timeout. The semaphore publishes the result.
 final class NotificationReply<Value>: @unchecked Sendable {
@@ -21,7 +18,6 @@ final class NotificationReply<Value>: @unchecked Sendable {
 
     func wait(_ step: String, deadline: DispatchTime = .now() + 30) throws -> Value {
         guard done.wait(timeout: deadline) == .success, let result else {
-            os_log("%{public}@ timed out", log: updateLog, type: .error, step)
             throw NSError(domain: "NightKeys.NotificationTimeout", code: 1)
         }
         return try result.get()
@@ -73,7 +69,6 @@ func notifyUpdate(
             authorization = try status()
         }
         guard authorization == .authorized || authorization == .provisional else {
-            os_log("Notifications are not allowed", log: updateLog, type: .info)
             return 0
         }
         let installed = arguments[3] == "--installed"
@@ -83,11 +78,8 @@ func notifyUpdate(
         content.body = installed ? "The update was installed successfully." : "Open settings to install the update."
         let request = UNNotificationRequest(identifier: "release-update", content: content, trigger: nil)
         try post(request)
-        os_log("Release notification posted", log: updateLog, type: .info)
         return 0
     } catch {
-        let error = error as NSError
-        os_log("Release notification failed: %{public}@ %ld", log: updateLog, type: .error, error.domain, error.code)
         return 1
     }
 }
@@ -295,11 +287,7 @@ final class Model: ObservableObject {
     var isEnabled: Bool { agentStatus == .enabled || agentStatus == .requiresApproval }
 
     func setAgentEnabled(_ on: Bool) {
-        do {
-            try setLoginItemsEnabled(on)
-        } catch {
-            NSLog("NightKeys: could not \(on ? "register" : "unregister") the agent: \(error)")
-        }
+        try? setLoginItemsEnabled(on)
         // The agent gives control back when it stops, but it may not have been running (e.g. still waiting for
         // permission), so make sure here: macOS's idle timer runs again and the light is at the user's level.
         if !on {
