@@ -2,6 +2,13 @@
 #include <assert.h>
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <IOKit/hid/IOHIDValue.h>
+
+typedef struct { uint32_t page, usage; CFIndex value; } TestHIDValue;
+static IOHIDElementRef testValueElement(IOHIDValueRef value) { return (IOHIDElementRef)value; }
+static uint32_t testElementPage(IOHIDElementRef element) { return ((TestHIDValue *)element)->page; }
+static uint32_t testElementUsage(IOHIDElementRef element) { return ((TestHIDValue *)element)->usage; }
+static CFIndex testIntegerValue(IOHIDValueRef value) { return ((TestHIDValue *)value)->value; }
 
 static CGDirectDisplayID testMainDisplay = 10, testBuiltInDisplay = 10;
 static BOOL testMainAsleep, testBuiltInAsleep;
@@ -55,6 +62,10 @@ static void testPostNotification(CFNotificationCenterRef center, CFNotificationN
 #define CGDisplayIsAsleep testDisplayIsAsleep
 #define CGGetOnlineDisplayList testOnlineDisplays
 #define CGSessionCopyCurrentDictionary testCopySession
+#define IOHIDValueGetElement testValueElement
+#define IOHIDElementGetUsagePage testElementPage
+#define IOHIDElementGetUsage testElementUsage
+#define IOHIDValueGetIntegerValue testIntegerValue
 #define main agentMain
 #import "../Sources/Agent/nightkeysd.m"
 #undef main
@@ -533,6 +544,44 @@ static void testKeyActivityCost(void) {
     gTimer = nil;
 }
 
+static void testHIDKeyRelease(void) {
+    BacklightFixture *client = fixture();
+    gKbd = client.currentID;
+    gTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_resume(gTimer);
+    gTimeout = 10;
+    gLevel = 0.625;
+    gAmbientEnabled = YES;
+    gDisplay = client;
+    client.lux = @0;
+    TestHIDValue release = {kHIDPage_KeyboardOrKeypad, 4, 0};
+    TestHIDValue press = {kHIDPage_KeyboardOrKeypad, 4, 1};
+    for (int locked = 1; locked >= 0; locked--) {
+        if (locked) {
+            gSession = gLit = YES;
+            screenLockChanged(NULL, NULL, CFSTR("com.apple.screenIsLocked"), NULL, NULL);
+        } else {
+            gScreenLocked = NO;
+            endSession();
+        }
+        assert(!gSession && !gLit);
+        NSUInteger writes = client.writes.count;
+        CFAbsoluteTime lastKey = gLastKey;
+        hidCallback(NULL, kIOReturnSuccess, NULL, (IOHIDValueRef)&release);
+        assert(!gSession && !gLit && client.writes.count == writes && gLastKey == lastKey);
+        hidCallback(NULL, kIOReturnSuccess, NULL, (IOHIDValueRef)&press);
+        assert(gSession && gLit && client.writes.count == writes + 1);
+        assert([client.writes.lastObject[@"level"] floatValue] == gLevel);
+        gLastKey = 123;
+        hidCallback(NULL, kIOReturnSuccess, NULL, (IOHIDValueRef)&release);
+        assert(gLastKey == 123 && client.writes.count == writes + 1);
+    }
+    endSession();
+    gDisplay = nil;
+    dispatch_source_cancel(gTimer);
+    gTimer = nil;
+}
+
 static void testLockTyping(void) {
     BacklightFixture *client = fixture();
     gKbd = client.currentID;
@@ -742,6 +791,7 @@ int main(void) {
         testWindowPreview();
         testLiveState();
         testKeyActivityCost();
+        testHIDKeyRelease();
         testLockTyping();
         testSleepAndLock();
         testRetry();

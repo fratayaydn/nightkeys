@@ -441,6 +441,7 @@ static void hidCallback(void *ctx, IOReturn result, void *sender, IOHIDValueRef 
     IOHIDElementRef el = IOHIDValueGetElement(value);
     uint32_t page = IOHIDElementGetUsagePage(el), usage = IOHIDElementGetUsage(el);
     BOOL brightness = noteBrightnessKey(page, usage, IOHIDValueGetIntegerValue(value));
+    if (IOHIDValueGetIntegerValue(value) == 0) return;
     // 0x07 regular keys (0-3 are error/rollover codes), 0x0C media keys, 0xFF/0xFF00 fn key
     if ((page == kHIDPage_KeyboardOrKeypad && usage > 3 && usage != 0xFFFFFFFF) ||
         page == kHIDPage_Consumer || brightness || ((page == 0xFF || page == 0xFF00) && usage == 0x03))

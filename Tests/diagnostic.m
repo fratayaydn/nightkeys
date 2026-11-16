@@ -75,6 +75,7 @@ int main(void) {
         testLiveState();
         testLockTyping();
         testKeyActivityCost();
+        testHIDKeyRelease();
         testSleepAndLock();
         testRetry();
         testWake(NO);
