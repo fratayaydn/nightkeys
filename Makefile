@@ -89,6 +89,7 @@ release-app:
 	@if [ -z "$(RELEASE_IDENTITY)" ]; then echo "Set RELEASE_IDENTITY (see the Makefile)."; exit 1; fi
 	rm -rf $(RELEASE_DIR)
 	$(MAKE) BUILD=$(RELEASE_DIR) SIGN_IDENTITY="$(RELEASE_IDENTITY)" TIMESTAMP=--timestamp DIAGNOSTIC_LOG=0 AGENT_DIAGNOSTIC_FLAGS=
+	sh Tests/release-logging.sh $(RELEASE_DIR)/NightKeys.app/Contents/MacOS/*
 
 # Disk image only, without notarization: for checking the window layout.
 dmg: release-app

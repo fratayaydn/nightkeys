@@ -73,6 +73,9 @@ int main(void) {
         testExternalBrightness();
         testWindowPreview();
         testLiveState();
+        testLockTyping();
+        testKeyActivityCost();
+        testSleepAndLock();
         testRetry();
         testWake(NO);
         testWake(YES);
@@ -100,16 +103,17 @@ int main(void) {
         NSArray *entries = diagnosticRead();
         assert([entries[0][@"text"] isEqual:
                 @"external brightness value=0.000 class=automatic reason=display asleep live display asleep=1 screen locked=0"]);
-        assert([entries[1][@"text"] isEqual:@"external brightness restore action=saved level level=0.625"]);
+        assert([entries[1][@"text"] isEqual:@"external brightness restore action=keep dark level=0.000"]);
         assert(gLevel == 0.625f);
         resetLog();
+        testMainAsleep = NO;
         gLastBrightnessKey = CFAbsoluteTimeGetCurrent();
         gTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
         dispatch_resume(gTimer);
         systemSettingChanged(CB_BRIGHTNESS, @0.75);
         entries = diagnosticRead();
         assert([entries[0][@"text"] isEqual:
-                @"external brightness value=0.750 class=manual reason=brightness key within 3 seconds live display asleep=1 screen locked=0"]);
+                @"external brightness value=0.750 class=manual reason=brightness key within 3 seconds live display asleep=0 screen locked=0"]);
         cancelManualSave();
         resetLog();
         testMainAsleep = NO;
@@ -118,9 +122,9 @@ int main(void) {
         NSUInteger writes = client.writes.count;
         systemSettingChanged(CB_BRIGHTNESS, @0.754);
         entries = diagnosticRead();
-        assert(entries.count == 1 && client.writes.count == writes && !gManualPending);
+        assert(entries.count >= 2 && client.writes.count == writes + 1 && !gManualPending && !gSession && !gLit);
         assert([entries[0][@"text"] isEqual:
-                @"external brightness value=0.754 class=manual reason=matches configured Level live display asleep=0 screen locked=1"]);
+                @"external brightness value=0.754 class=automatic reason=screen locked live display asleep=0 screen locked=1"]);
         dispatch_source_cancel(gTimer);
         gTimer = nil;
         resetLog();

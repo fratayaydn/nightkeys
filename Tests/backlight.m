@@ -69,6 +69,7 @@ typedef void (^SettingCallback)(id, id);
 @property NSUInteger brightnessReads;
 @property BOOL idleSuspended;
 @property NSUInteger failuresRemaining;
+@property NSNumber *lux;
 @property NSMutableArray<NSDictionary *> *writes;
 @property NSMutableArray<NSNumber *> *registrations;
 @property NSMutableArray<NSNumber *> *suspensions;
@@ -108,6 +109,10 @@ typedef void (^SettingCallback)(id, id);
     self.brightnessReads++;
     return self.liveBrightness;
 }
+- (id)copyPropertyForKey:(id)key {
+    assert([key isEqual:@"AggregatedLux"]);
+    return self.lux;
+}
 - (BOOL)setBrightness:(float)level fadeSpeed:(int)fade commit:(BOOL)commit forKeyboard:(unsigned long long)keyboard {
     [self.writes addObject:@{@"keyboard": @(keyboard), @"level": @(level), @"fade": @(fade), @"commit": @(commit)}];
     if (self.failuresRemaining) {
@@ -120,6 +125,9 @@ typedef void (^SettingCallback)(id, id);
 
 static BacklightFixture *fixture(void) {
     BacklightFixture *client = [BacklightFixture new];
+    testMainAsleep = testBuiltInAsleep = NO;
+    testSession = nil;
+    gDisplayAsleep = gScreenLocked = NO;
     gClient = client;
     gKbd = 1;
     gLit = YES;
@@ -281,7 +289,9 @@ static void testLevelPreferences(void) {
 }
 
 static void testClassification(void) {
-    assert(classifyBrightness(100, 97, 99, YES, YES) == BrightnessManualKey);
+    assert(classifyBrightness(100, 97, 99, YES, YES) == BrightnessAutomaticDisplay);
+    assert(classifyBrightness(100, 97, 99, NO, YES) == BrightnessAutomaticLock);
+    assert(classifyBrightness(100, 97, 99, NO, NO) == BrightnessManualKey);
     assert(classifyBrightness(100, 96.999, 99, NO, NO) == BrightnessAutomaticTransition);
     assert(classifyBrightness(100, 101, 99, NO, NO) == BrightnessAutomaticTransition);
     assert(classifyBrightness(100, 0, 90, NO, NO) == BrightnessAutomaticTransition);
@@ -327,11 +337,11 @@ static void testExternalBrightness(void) {
     testPreferences[@"Level"] = @(gLevel);
     gPreferencesLevel = gLevel;
     gLastBrightnessKey = 0;
-    testMainAsleep = YES;
+    testMainAsleep = NO;
     testSession = @{@"CGSSessionScreenIsLocked": @NO};
     gLastTransition = CFAbsoluteTimeGetCurrent();
     NSUInteger before = preferenceWrites;
-    // Automatic zero must restore the saved level only when both session flags are true.
+    // Awake transition changes restore the saved level only when both session flags are true.
     for (int state = 0; state < 4; state++) {
         gSession = (state & 1) != 0;
         gLit = (state & 2) != 0;
@@ -421,8 +431,8 @@ static void testWindowPreview(void) {
     dispatch_resume(gTimer);
     gTimeout = 10;
     gAmbientEnabled = YES;  // A direct preview bypasses ambient gating.
-    testMainAsleep = YES;
-    testSession = @{@"CGSSessionScreenIsLocked": @YES};
+    testMainAsleep = NO;
+    testSession = @{@"CGSSessionScreenIsLocked": @NO};
     gLastBrightnessKey = 0;
     gLastTransition = CFAbsoluteTimeGetCurrent();
     NSUInteger before = preferenceWrites;
@@ -478,6 +488,156 @@ static void testWindowPreview(void) {
     gTimer = nil;
 }
 
+static void testKeyActivityCost(void) {
+    BacklightFixture *client = fixture();
+    gKbd = client.currentID;
+    gTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_resume(gTimer);
+    gTimeout = 10;
+    gAmbientEnabled = NO;
+    gLevel = 0.625;
+    endSession();
+    NSUInteger previousDisplays = displayReads, previousSessions = sessionReads;
+    keyActivity();
+    assert(gSession && gLit);
+    assert(displayReads == previousDisplays && sessionReads == previousSessions);
+    NSUInteger writes = client.writes.count;
+    for (int i = 0; i < 100; i++) keyActivity();
+    gLuxCheckedAt -= kLuxRecheckSeconds;
+    keyActivity();
+    assert(client.writes.count == writes);
+    client.failuresRemaining = 1;
+    assert(setLevel(gLevel, 0));
+    assert(displayReads == previousDisplays && sessionReads == previousSessions);
+
+    NSNotificationCenter *center = [NSNotificationCenter new];
+    registerDisplayWakeNotification(center);
+    // Notifications must gate lighting even before the live display query catches up.
+    for (int systemSleep = 0; systemSleep < 2; systemSleep++) {
+        if (systemSleep) powerCallback(NULL, 0, kIOMessageSystemWillSleep, NULL);
+        else [center postNotificationName:NSWorkspaceScreensDidSleepNotification object:nil];
+        assert(!gSession && !gLit);
+        writes = client.writes.count;
+        keyActivity();
+        assert(!gSession && !gLit && client.writes.count == writes);
+        assert(!setLevel(gLevel, 0));
+        assert(displayReads == previousDisplays && sessionReads == previousSessions);
+        if (systemSleep) powerCallback(NULL, 0, kIOMessageSystemHasPoweredOn, NULL);
+        else [center postNotificationName:NSWorkspaceScreensDidWakeNotification object:nil];
+        assert(!gSession && !gLit);
+        keyActivity();
+        assert(gSession && gLit);
+        assert(displayReads == previousDisplays && sessionReads == previousSessions);
+    }
+    dispatch_source_cancel(gTimer);
+    gTimer = nil;
+}
+
+static void testLockTyping(void) {
+    BacklightFixture *client = fixture();
+    gKbd = client.currentID;
+    gTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_resume(gTimer);
+    gLevel = gPreferencesLevel = 0.625;
+    testPreferences[@"Level"] = @(gLevel);
+    testSession = @{@"CGSSessionScreenIsLocked": @YES};
+    NSUInteger before = preferenceWrites;
+    for (NSNumber *timeout in @[@0, @10]) {
+        gTimeout = timeout.doubleValue;
+        gSession = gLit = YES;
+        screenLockChanged(NULL, NULL, CFSTR("com.apple.screenIsLocked"), NULL, NULL);
+        assert(!gSession && !gLit && [client.writes.lastObject[@"level"] floatValue] == 0);
+        gAmbientEnabled = YES;
+        gDisplay = client;
+        client.lux = @100;
+        keyActivity();
+        assert(gSession && !gLit);
+        endSession();
+        client.lux = @0;
+        for (NSNumber *value in @[@0, @0.25, @0.625, @1]) {
+            keyActivity();
+            assert(gSession && gLit && [client.writes.lastObject[@"level"] floatValue] == gLevel);
+            NSUInteger writes = client.writes.count;
+            systemSettingChanged(CB_BRIGHTNESS, @(gLevel));
+            assert(gSession && gLit && client.writes.count == writes);  // Our typing echo keeps the session.
+            gLastBrightnessKey = CFAbsoluteTimeGetCurrent();
+            gSetAt = 0;  // An independent macOS change, including one matching Level.
+            systemSettingChanged(CB_BRIGHTNESS, value);
+            assert(!gSession && !gLit && gLevel == 0.625f && !gManualPending);
+            assert([client.writes.lastObject[@"level"] floatValue] == 0);
+            writes = client.writes.count;
+            systemSettingChanged(CB_BRIGHTNESS, @0);
+            assert(!gSession && !gLit && client.writes.count == writes);
+        }
+        assert(preferenceWrites == before);
+        screenLockChanged(NULL, NULL, CFSTR("com.apple.screenIsUnlocked"), NULL, NULL);
+        assert(!gSession && !gLit);
+        keyActivity();
+        assert(gSession && gLit);
+    }
+    gDisplay = nil;
+    dispatch_source_cancel(gTimer);
+    gTimer = nil;
+}
+
+static void testSleepAndLock(void) {
+    BacklightFixture *client = fixture();
+    gKbd = client.currentID;
+    gTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_resume(gTimer);
+    NSNotificationCenter *center = [NSNotificationCenter new];
+    registerDisplayWakeNotification(center);
+    gAmbientEnabled = NO;
+    for (NSNumber *timeout in @[@0, @10]) {
+        gTimeout = timeout.doubleValue;
+        for (int state = 1; state < 4; state += 2) {
+            testMainAsleep = (state & 1) != 0;
+            testSession = @{@"CGSSessionScreenIsLocked": @((state & 2) != 0)};
+            gLevel = gPreferencesLevel = 0.625;
+            testPreferences[@"Level"] = @(gLevel);
+            gSession = gLit = YES;
+            if (state & 2) screenLockChanged(NULL, NULL, CFSTR("com.apple.screenIsLocked"), NULL, NULL);
+            [center postNotificationName:NSWorkspaceScreensDidSleepNotification object:nil];
+            assert(!gSession && !gLit);
+            [client.writes removeAllObjects];
+            NSUInteger before = preferenceWrites;
+            for (NSNumber *value in @[@0, @0.25, @0.625, @1]) {
+                // Live state must also end a session if its sleep or lock notification was missed.
+                gSession = gLit = YES;
+                gLastBrightnessKey = CFAbsoluteTimeGetCurrent();
+                gSetLevel = value.floatValue;
+                gSetAt = CFAbsoluteTimeGetCurrent();
+                systemSettingChanged(CB_BRIGHTNESS, value);
+                assert(!gSession && !gLit && gLevel == 0.625f && !gManualPending);
+                keyActivity();
+                assert(!gSession && !gLit);
+                NSUInteger writes = client.writes.count;
+                systemSettingChanged(CB_BRIGHTNESS, @0);
+                assert(client.writes.count == writes);  // Our zero echo cannot trigger another write.
+            }
+            assert(preferenceWrites == before);
+            // Preview, direct writes and shutdown must also stay dark.
+            testPreferences[@"Level"] = @0.75;
+            settingsChanged(NULL, NULL, NULL, NULL, NULL);
+            assert(gLevel == 0.75f && !gSession && !gLit);
+            assert(!setLevel(0.75, 0));
+            giveBackControl();
+            for (NSDictionary *write in client.writes) assert([write[@"level"] floatValue] == 0);
+            testMainAsleep = NO;
+            testSession = @{@"CGSSessionScreenIsLocked": @NO};
+            [client.writes removeAllObjects];
+            [center postNotificationName:NSWorkspaceScreensDidWakeNotification object:nil];
+            screenLockChanged(NULL, NULL, CFSTR("com.apple.screenIsUnlocked"), NULL, NULL);
+            assert(!gSession && !gLit);
+            for (NSDictionary *write in client.writes) assert([write[@"level"] floatValue] == 0);
+            keyActivity();
+            assert(gSession && gLit && [client.writes.lastObject[@"level"] floatValue] == 0.75f);
+        }
+    }
+    dispatch_source_cancel(gTimer);
+    gTimer = nil;
+}
+
 static void testLiveState(void) {
     BacklightFixture *client = fixture();
     gKbd = client.currentID;
@@ -502,7 +662,7 @@ static void testLiveState(void) {
         [client.writes removeAllObjects];
         NSUInteger previousDisplays = displayReads, previousSessions = sessionReads;
         systemSettingChanged(CB_BRIGHTNESS, @0.25);
-        assert(displayReads > previousDisplays && sessionReads == previousSessions + 1);
+        assert(displayReads > previousDisplays && sessionReads > previousSessions);
         assert(gLevel == (state == 0 ? 0.25f : 0.625f));
         assert(gSession == (state == 0) && gLit == (state == 0));
         assert(client.writes.count == (state == 0 ? 0 : 1));
@@ -581,13 +741,16 @@ int main(void) {
         testExternalBrightness();
         testWindowPreview();
         testLiveState();
+        testKeyActivityCost();
+        testLockTyping();
+        testSleepAndLock();
         testRetry();
         testWake(NO);
         testWake(YES);
         testNotificationRecovery();
         testTransitions();
         puts("Passed level checks: classification, ramp coalescing, saved manual levels, automatic restore "
-             "and window preview in either notification order, plus live display/lock state.");
+             "and window preview in either notification order, plus sleep/lock session end and wake typing.");
         puts("Passed backlight checks: system wake, display wake, ID recovery, notification recovery "
              "and bounded retry.");
     }

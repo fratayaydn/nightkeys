@@ -96,7 +96,19 @@ let thresholdKey = "AmbientThresholdLux"
 let permissionKey = "StatusInputMonitoringGranted"
 let defaultThresholdLux = 3.0
 let registeredBuildKey = "RegisteredBuildID"
+let reregistrationPendingKey = "ReregistrationPending"
 let currentBuildID = Bundle.main.object(forInfoDictionaryKey: "NTBuildID") as? String ?? ""
+
+enum ReregistrationAction {
+    case none, storeBuildID, reregister
+}
+
+func reregistrationAction(storedBuildID: String?, currentBuildID: String, pending: Bool,
+                          agentEnabled: Bool, updaterMissing: Bool) -> ReregistrationAction {
+    if pending { return .reregister }
+    guard storedBuildID != currentBuildID || updaterMissing else { return .none }
+    return agentEnabled ? .reregister : .storeBuildID
+}
 
 /// The brightness keys change keyboard brightness by 1/16; the buttons at the ends of the slider do the same.
 let brightnessStep = 1.0 / 16
@@ -188,13 +200,26 @@ final class Model: ObservableObject {
     /// constraint), so after an update the agent is registered again, if it was enabled. The new registration
     /// must wait until the old one is fully removed.
     private func reregisterAfterUpdate() {
-        guard defaults.string(forKey: registeredBuildKey) != currentBuildID
-            || SMAppService.agent(plistName: updaterPlistName).status == .notRegistered else { return }
-        defaults.set(currentBuildID, forKey: registeredBuildKey)
-        guard agent.status == .enabled || agent.status == .requiresApproval else { return }
-        DispatchQueue.global().async { [weak self] in
+        let action = reregistrationAction(storedBuildID: defaults.string(forKey: registeredBuildKey),
+            currentBuildID: currentBuildID, pending: defaults.bool(forKey: reregistrationPendingKey),
+            agentEnabled: agent.status == .enabled || agent.status == .requiresApproval,
+            updaterMissing: SMAppService.agent(plistName: updaterPlistName).status == .notRegistered)
+        switch action {
+        case .none: return
+        case .storeBuildID:
+            defaults.set(currentBuildID, forKey: registeredBuildKey)
+            return
+        case .reregister: break
+        }
+        // Closing the window can terminate the app while the agent is unregistered.
+        defaults.set(true, forKey: reregistrationPendingKey)
+        defaults.synchronize()
+        DispatchQueue.global().async { [weak self, defaults = self.defaults] in
             reregisterAgent()
             if !agentIsRunning() { reregisterAgent() }  // right after an update the first pass may not take
+            defaults.set(currentBuildID, forKey: registeredBuildKey)
+            defaults.removeObject(forKey: reregistrationPendingKey)
+            defaults.synchronize()
             DispatchQueue.main.async { self?.readAgentState() }
         }
     }
@@ -287,6 +312,8 @@ final class Model: ObservableObject {
     var isEnabled: Bool { agentStatus == .enabled || agentStatus == .requiresApproval }
 
     func setAgentEnabled(_ on: Bool) {
+        defaults.removeObject(forKey: reregistrationPendingKey)
+        defaults.synchronize()
         try? setLoginItemsEnabled(on)
         // The agent gives control back when it stops, but it may not have been running (e.g. still waiting for
         // permission), so make sure here: macOS's idle timer runs again and the light is at the user's level.
@@ -395,7 +422,7 @@ struct ContentView: View {
                     Button(model.checkingUpdates ? "Checking..." : "Check Now") { model.checkUpdates() }
                         .disabled(model.checkingUpdates)
                 }
-                if !model.automaticUpdates, let version = model.availableVersion {
+                if let version = model.availableVersion {
                     Button("Install \(version)") { model.checkUpdates(install: true) }
                         .disabled(model.checkingUpdates)
                 }
@@ -518,7 +545,10 @@ func agentIsRunning() -> Bool { launchctl(["print", agentJob]).contains("state =
 func reregisterAgent() {
     try? setLoginItemsEnabled(false)
     for job in [updaterJob, agentJob] {
-        for _ in 0..<70 where !launchctl(["print", job]).isEmpty { Thread.sleep(forTimeInterval: 0.5) }
+        for _ in 0..<70 {
+            if launchctl(["print", job]).isEmpty { break }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
     }
     Thread.sleep(forTimeInterval: 1)
     try? setLoginItemsEnabled(true)
@@ -539,6 +569,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 startAgentOnce()
                 // This build is registered now; the window must not re-register it again (see reregisterAfterUpdate).
                 UserDefaults.standard.set(currentBuildID, forKey: registeredBuildKey)
+                UserDefaults.standard.removeObject(forKey: reregistrationPendingKey)
                 UserDefaults.standard.synchronize()  // exit() would otherwise drop the unsaved value
                 exit(0)
             } catch {

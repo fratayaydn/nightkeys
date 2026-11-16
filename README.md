@@ -16,8 +16,8 @@ in **System Settings > Keyboard**.
 
 - Optionally stays off in bright rooms, using the ambient light sensor and a threshold you pick
 - Uses the timeout and low-light mode from **System Settings > Keyboard**, so changes show up in both places
-- Changes you make with the brightness keys, Control Center or System Settings are kept; changes macOS makes
-  by itself around sleep or lock are undone.
+- Changes you make with the brightness keys, Control Center or System Settings while awake and unlocked are kept.
+  Display sleep and screen lock turn the light off until you type again.
 - About 3 MB of memory and no CPU while idle; it sleeps until you press a key (see [Footprint](#footprint))
 
 ## Requirements
@@ -66,7 +66,8 @@ Turning off **Enable NightKeys** stops the background agent and hands the backli
 
 ## Updates
 
-Once a day, and after a restart, NightKeys asks GitHub for the latest release and installs it if it's newer.
+NightKeys asks GitHub for the latest release once a day and installs it if it's newer. At login, it checks only
+if about 20 hours have passed since the last check or macOS was updated.
 An update is only installed when it's signed with the same Developer ID and notarized by Apple. The disk image
 is checked before it's opened, and the app inside is checked again before it replaces the old one. The check
 also runs at the first login after a macOS update, in case a fix for that version is already out.

@@ -367,11 +367,11 @@ int updaterRun(BOOL force, BOOL install) {
             return 0;
         }
         BOOL automatic = install || preferenceEnabled(@"AutomaticallyInstallUpdates");
-        if (automatic && !installRelease(session, release, version, current, installed)) return 1;
+        BOOL failed = automatic && !installRelease(session, release, version, current, installed);
         // Resolve the main executable at the installed path after the swap, so the new app sends the notification.
         NSString *notifier = [installed URLByAppendingPathComponent:@"Contents/MacOS/NightKeys"].path;
-        runTool(notifier, @[@"--notify-update", version, automatic ? @"--installed" : @"--available"], 60);
-        return 0;
+        runTool(notifier, @[@"--notify-update", version, automatic && !failed ? @"--installed" : @"--available"], 60);
+        return failed ? 1 : 0;
     } @finally {
         [session invalidateAndCancel];
         flock(lock, LOCK_UN);

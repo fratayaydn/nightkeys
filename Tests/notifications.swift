@@ -78,11 +78,34 @@ private func testLevel() {
     print("Passed window level checks: migration, fixed slider, persistence, notification, preview and steps.")
 }
 
+private func testReregistration() {
+    let cases: [(String?, Bool, Bool, Bool, ReregistrationAction)] = [
+        ("current", false, true, false, .none),
+        ("current", false, false, false, .none),
+        ("old", false, true, false, .reregister),
+        (nil, false, true, false, .reregister),
+        ("old", false, false, false, .storeBuildID),
+        (nil, false, false, false, .storeBuildID),
+        ("current", false, true, true, .reregister),
+        ("current", false, false, true, .storeBuildID),
+        ("current", true, false, false, .reregister),
+        ("current", true, true, false, .reregister),
+        ("old", true, false, false, .reregister),
+        (nil, true, false, true, .reregister),
+    ]
+    for (stored, pending, enabled, updaterMissing, expected) in cases {
+        precondition(reregistrationAction(storedBuildID: stored, currentBuildID: "current",
+            pending: pending, agentEnabled: enabled, updaterMissing: updaterMissing) == expected)
+    }
+    print("Passed re-registration checks: build IDs, pending recovery, enabled state and missing updater.")
+}
+
 @main
 enum NotificationTests {
     @MainActor
     static func main() throws {
         precondition(NSApp == nil)
+        testReregistration()
         testLevel()
         let installed = ["--notify-update", "1.2.3", "--installed"]
         let available = ["--notify-update", "1.2.3", "--available"]
