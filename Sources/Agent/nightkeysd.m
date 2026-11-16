@@ -580,19 +580,40 @@ static void unregisterLoginItem(void) {
     }
 }
 
-// NightKeys.app was moved to the Trash or replaced by an update. An update puts a new copy at the same path
-// within moments: exit with an error so launchd starts the new agent. Otherwise the app is gone: give the
-// backlight back and exit for good (a successful exit is not restarted).
-static void appMoved(void) {
-    dispatch_source_cancel(gBundleWatch);
+typedef enum { AppMoveRestart, AppMoveKeepRunning, AppMoveRemoveAndExit } AppMoveAction;
+
+static AppMoveAction appMoveAction(BOOL oldPathRestored, NSString *currentBundlePath) {
+    if (oldPathRestored) return AppMoveRestart;
+    if (!currentBundlePath || [currentBundlePath.pathComponents containsObject:@".Trash"]
+        || [currentBundlePath.pathComponents containsObject:@".Trashes"]) return AppMoveRemoveAndExit;
+    return AppMoveKeepRunning;
+}
+
+// An update puts a new copy at the same path within moments. A move keeps the bundle's vnode watch alive;
+// only removal or a move to the Trash removes the login items and gives the backlight back.
+static void appMoved(int fd) {
+    BOOL restored = NO;
+    struct stat st;
     for (int i = 0; i < 10; i++) {
         sleep(1);
-        struct stat st;
-        if (stat(gExecutable, &st) == 0) {
+        if (stat(gExecutable, &st) == 0) { restored = YES; break; }
+    }
+    char path[PATH_MAX];
+    NSString *current = fcntl(fd, F_GETPATH, path) == 0 && stat(path, &st) == 0
+        ? [[NSFileManager defaultManager] stringWithFileSystemRepresentation:path length:strlen(path)] : nil;
+    switch (appMoveAction(restored, current)) {
+        case AppMoveRestart:
+            dispatch_source_cancel(gBundleWatch);
             DIAG(@"NightKeys.app was updated, restarting");
             giveBackControlAndExit(1);
-        }
+            return;
+        case AppMoveKeepRunning:
+            strlcpy(gExecutable, [current stringByAppendingPathComponent:@"Contents/MacOS/nightkeysd"].fileSystemRepresentation,
+                    sizeof(gExecutable));
+            return;
+        case AppMoveRemoveAndExit: break;
     }
+    dispatch_source_cancel(gBundleWatch);
     DIAG(@"NightKeys.app was removed, exiting");
     giveBackControl();
     usleep(300 * 1000);
@@ -613,7 +634,7 @@ static void watchAppBundle(void) {
     gBundleWatch = dispatch_source_create(DISPATCH_SOURCE_TYPE_VNODE, fd,
                                           DISPATCH_VNODE_DELETE | DISPATCH_VNODE_RENAME | DISPATCH_VNODE_REVOKE,
                                           dispatch_get_main_queue());
-    dispatch_source_set_event_handler(gBundleWatch, ^{ appMoved(); });
+    dispatch_source_set_event_handler(gBundleWatch, ^{ appMoved(fd); });
     dispatch_source_set_cancel_handler(gBundleWatch, ^{ close(fd); });
     dispatch_resume(gBundleWatch);
 }

@@ -95,6 +95,7 @@ let verifyPermissionNotification = Notification.Name("io.github.fratayaydn.night
 let thresholdKey = "AmbientThresholdLux"
 let permissionKey = "StatusInputMonitoringGranted"
 let defaultThresholdLux = 3.0
+let minimumThresholdLux = 0.3
 let registeredBuildKey = "RegisteredBuildID"
 let reregistrationPendingKey = "ReregistrationPending"
 let currentBuildID = Bundle.main.object(forInfoDictionaryKey: "NTBuildID") as? String ?? ""
@@ -303,6 +304,7 @@ final class Model: ObservableObject {
     }
 
     func setThreshold(_ lux: Double) {
+        let lux = max(lux, minimumThresholdLux)
         thresholdLux = lux
         defaults.set(lux, forKey: thresholdKey)
         defaults.synchronize()
@@ -311,10 +313,15 @@ final class Model: ObservableObject {
 
     var isEnabled: Bool { agentStatus == .enabled || agentStatus == .requiresApproval }
 
-    func setAgentEnabled(_ on: Bool) {
+    func setAgentEnabled(_ on: Bool, setEnabled: (Bool) throws -> Void = setLoginItemsEnabled) {
         defaults.removeObject(forKey: reregistrationPendingKey)
         defaults.synchronize()
-        try? setLoginItemsEnabled(on)
+        do {
+            try setEnabled(on)
+        } catch {
+            let action = on ? "enable" : "disable"
+            errorMessage = "Could not \(action) NightKeys: \(error.localizedDescription)"
+        }
         // The agent gives control back when it stops, but it may not have been running (e.g. still waiting for
         // permission), so make sure here: macOS's idle timer runs again and the light is at the user's level.
         if !on {
@@ -326,7 +333,7 @@ final class Model: ObservableObject {
 }
 
 /// Lux values span orders of magnitude, so the threshold slider is logarithmic.
-let luxRange = log10(0.3)...log10(300.0)
+let luxRange = log10(minimumThresholdLux)...log10(300.0)
 
 struct ContentView: View {
     @StateObject private var model = Model()
@@ -385,7 +392,7 @@ struct ContentView: View {
                 if model.lowLightMode {
                     LabeledContent {
                         HStack {
-                            Slider(value: Binding(get: { log10(max(model.thresholdLux, 0.3)) },
+                            Slider(value: Binding(get: { log10(max(model.thresholdLux, minimumThresholdLux)) },
                                                   set: { model.setThreshold((pow(10, $0) * 10).rounded() / 10) }),
                                    in: luxRange)
                             Text(String(format: "%.1f lux", model.thresholdLux)).monospacedDigit().frame(width: 70, alignment: .trailing)

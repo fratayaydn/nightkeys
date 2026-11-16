@@ -782,8 +782,27 @@ static void testTransitions(void) {
 
 #ifndef BACKLIGHT_TEST_LIBRARY
 
+static void testAppMoveDecision(void) {
+    struct { NSString *path; AppMoveAction action; } cases[] = {
+        {nil, AppMoveRemoveAndExit},
+        {@"/Applications/Utilities/NightKeys.app", AppMoveKeepRunning},
+        {@"/Applications/Renamed.app", AppMoveKeepRunning},
+        {@"/Users/test/.Trash/NightKeys.app", AppMoveRemoveAndExit},
+        {@"/Users/test/.Trash/folder/NightKeys.app", AppMoveRemoveAndExit},
+        {@"/Volumes/External/.Trashes/501/NightKeys.app", AppMoveRemoveAndExit},
+        {@"/Applications/.Trash Helper/NightKeys.app", AppMoveKeepRunning},
+        {@"/Applications/.Trashes.app", AppMoveKeepRunning},
+    };
+    for (NSUInteger i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        assert(appMoveAction(YES, cases[i].path) == AppMoveRestart);
+        assert(appMoveAction(NO, cases[i].path) == cases[i].action);
+    }
+    puts("Passed app move checks: update, move, rename, Trash components and unresolved or deleted bundle.");
+}
+
 int main(void) {
     @autoreleasepool {
+        testAppMoveDecision();
         testClassification();
         testBrightnessKeys();
         testLevelPreferences();

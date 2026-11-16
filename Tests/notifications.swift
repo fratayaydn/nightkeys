@@ -34,6 +34,7 @@ private final class LevelDefaults: UserDefaults {
     override func object(forKey key: String) -> Any? { values[key] }
     override func double(forKey key: String) -> Double { values[key] as? Double ?? 0 }
     override func set(_ value: Any?, forKey key: String) { values[key] = value }
+    override func removeObject(forKey key: String) { values.removeValue(forKey: key) }
     override func synchronize() -> Bool { true }
 }
 
@@ -100,6 +101,34 @@ private func testReregistration() {
     print("Passed re-registration checks: build IDs, pending recovery, enabled state and missing updater.")
 }
 
+private func testThreshold() {
+    let defaults = LevelDefaults()
+    var notifications = 0
+    let model = Model(defaults: defaults, startObserving: false, settingsChanged: { notifications += 1 })
+    for (reading, expected) in [(0.0, 0.3), (0.049, 0.3), (0.05, 0.3), (0.24, 0.3),
+                                (0.3, 0.3), (0.34, 0.3), (0.35, 0.4), (3.04, 3.0)] {
+        model.setThreshold((reading * 10).rounded() / 10)
+        precondition(model.thresholdLux == expected)
+        precondition(defaults.values[thresholdKey] as? Double == expected)
+        precondition(log10(model.thresholdLux) >= luxRange.lowerBound)
+    }
+    precondition(notifications == 8)
+    print("Passed window threshold checks: dark readings, slider minimum, rounding, persistence and notification.")
+}
+
+private func testEnableError() {
+    let defaults = LevelDefaults()
+    let model = Model(defaults: defaults, startObserving: false)
+    var requests: [Bool] = []
+    model.setAgentEnabled(true, setEnabled: {
+        requests.append($0)
+        throw testError
+    })
+    precondition(requests == [true])
+    precondition(model.errorMessage == "Could not enable NightKeys: \(testError.localizedDescription)")
+    print("Passed window enable error check: registration failure reaches the existing alert.")
+}
+
 @main
 enum NotificationTests {
     @MainActor
@@ -107,6 +136,8 @@ enum NotificationTests {
         precondition(NSApp == nil)
         testReregistration()
         testLevel()
+        testThreshold()
+        testEnableError()
         let installed = ["--notify-update", "1.2.3", "--installed"]
         let available = ["--notify-update", "1.2.3", "--available"]
         for version in ["", "v1.2.3", "1..2", ".1", "1.", "1.2.3.4", "-1", "1-beta", "1/2", "1. 2", "\u{0661}"] {
