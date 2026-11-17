@@ -111,6 +111,11 @@ func reregistrationAction(storedBuildID: String?, currentBuildID: String, pendin
     return agentEnabled ? .reregister : .storeBuildID
 }
 
+func shouldRelaunchAfterUpdate(runningVersion: String, diskVersion: String?) -> Bool {
+    guard let diskVersion else { return false }
+    return diskVersion != runningVersion
+}
+
 /// The brightness keys change keyboard brightness by 1/16; the buttons at the ends of the slider do the same.
 let brightnessStep = 1.0 / 16
 let levelKey = "Level"
@@ -262,7 +267,9 @@ final class Model: ObservableObject {
     func checkUpdates(install: Bool = false) {
         guard !checkingUpdates else { return }
         checkingUpdates = true
-        let executable = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/nightkeysd")
+        let bundleURL = Bundle.main.bundleURL
+        let runningVersion = version
+        let executable = bundleURL.appendingPathComponent("Contents/MacOS/nightkeysd")
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let process = Process()
             process.executableURL = executable
@@ -270,17 +277,32 @@ final class Model: ObservableObject {
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
             var message: String?
+            var relaunched = false
             do {
                 try process.run()
                 process.waitUntilExit()
                 if process.terminationReason != .exit || process.terminationStatus != 0 {
                     message = "Could not complete the update. Try again later."
+                } else if let data = try? Data(contentsOf: bundleURL.appendingPathComponent("Contents/Info.plist")),
+                          let info = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any],
+                          shouldRelaunchAfterUpdate(runningVersion: runningVersion,
+                              diskVersion: info["CFBundleShortVersionString"] as? String) {
+                    let opener = Process()
+                    opener.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                    opener.arguments = ["-n", bundleURL.path]
+                    opener.standardOutput = FileHandle.nullDevice
+                    opener.standardError = FileHandle.nullDevice
+                    try opener.run()
+                    opener.waitUntilExit()
+                    relaunched = opener.terminationReason == .exit && opener.terminationStatus == 0
                 }
             } catch {
                 message = "Could not check for updates: \(error.localizedDescription)"
             }
             let result = message
+            let shouldQuit = relaunched
             DispatchQueue.main.async {
+                if shouldQuit { NSApplication.shared.terminate(nil); return }
                 self?.checkingUpdates = false
                 self?.errorMessage = result
                 self?.readUpdateState()

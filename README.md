@@ -66,23 +66,24 @@ Turning off **Enable NightKeys** stops the background agent and hands the backli
 
 ## Updates
 
-NightKeys asks GitHub for the latest release once a day and installs it if it's newer. At login, it checks only
-if about 20 hours have passed since the last check or macOS was updated.
+By default, NightKeys asks GitHub for the latest release once a day and installs it if it's newer. At login, it
+checks only if about 20 hours have passed since the last check or macOS was updated.
 An update is only installed when it's signed with the same Developer ID and notarized by Apple. The disk image
 is checked before it's opened, and the app inside is checked again before it replaces the old one. The check
 also runs at the first login after a macOS update, in case a fix for that version is already out.
 
 The check is one request to `api.github.com` that sends only the app name and version. macOS asks once whether
 NightKeys may show a notification after an update; you can change that later in **System Settings > Notifications**.
-Turn off **Install updates automatically** to get a notification instead and install from the window.
-Homebrew installs update themselves too. The cask is marked as auto-updating, so `brew upgrade` skips it unless
+With **Install updates automatically** off, NightKeys does not check by itself. Click **Check Now** in the window
+to check, and install from there.
+Homebrew installs use the same updater. The cask is marked as auto-updating, so `brew upgrade` skips it unless
 you add `--greedy`.
 
 ## Footprint
 
 The background agent uses about 3 MB of memory and no CPU while idle. It doesn't poll: it only receives built-in
-keyboard events, so using the trackpad never wakes it. A separate, short daily update check contacts GitHub and
-then quits. The settings window runs only while it is open and quits when you close it.
+keyboard events, so using the trackpad never wakes it. With automatic installs on, a separate, short daily update
+check contacts GitHub and then quits. The settings window runs only while it is open and quits when you close it.
 
 Measured on macOS 26.7.1 with `footprint` and `top`.
 

@@ -101,6 +101,14 @@ private func testReregistration() {
     print("Passed re-registration checks: build IDs, pending recovery, enabled state and missing updater.")
 }
 
+private func testUpdateRelaunch() {
+    precondition(!shouldRelaunchAfterUpdate(runningVersion: "1.2.3", diskVersion: nil))
+    precondition(!shouldRelaunchAfterUpdate(runningVersion: "1.2.3", diskVersion: "1.2.3"))
+    precondition(shouldRelaunchAfterUpdate(runningVersion: "1.2.3", diskVersion: "1.2.4"))
+    precondition(shouldRelaunchAfterUpdate(runningVersion: "1.2.3", diskVersion: "1.2.2"))
+    print("Passed update relaunch checks: missing, equal and different versions.")
+}
+
 private func testThreshold() {
     let defaults = LevelDefaults()
     var notifications = 0
@@ -135,6 +143,7 @@ enum NotificationTests {
     static func main() throws {
         precondition(NSApp == nil)
         testReregistration()
+        testUpdateRelaunch()
         testLevel()
         testThreshold()
         testEnableError()
