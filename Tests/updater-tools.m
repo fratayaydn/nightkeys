@@ -60,7 +60,7 @@ static Boolean testSynchronize(CFStringRef domain) { (void)domain; return true; 
 #define NSURLSession UpdaterSessionFixture
 #import "../Sources/Agent/Updater.m"
 
-static void testInstallFailureNotification(void) {
+static void testUpdateNotifications(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *temporary = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
     NSURL *bundle = [NSURL fileURLWithPath:[temporary stringByAppendingPathComponent:@"NightKeys.app"]];
@@ -76,30 +76,47 @@ static void testInstallFailureNotification(void) {
         assert([script writeToFile:notifier atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
         assert([fm setAttributes:@{NSFilePosixPermissions: @0700} ofItemAtPath:notifier error:NULL]);
         NSString *arguments = [notifier stringByAppendingString:@".arguments"];
+        for (NSNumber *force in @[@NO, @YES]) for (NSNumber *install in @[@NO, @YES]) for (NSNumber *failed in @[@NO, @YES]) {
+            notifyUpdate(bundle, @"1.2.3", force.boolValue, install.boolValue, YES, failed.boolValue);
+            if (force.boolValue || install.boolValue) {
+                assert(![fm fileExistsAtPath:arguments]);
+            } else {
+                NSString *expected = failed.boolValue ? @"--notify-update\n1.2.3\n--available\n" :
+                                                       @"--notify-update\n1.2.3\n--installed\n";
+                assert([[NSString stringWithContentsOfFile:arguments encoding:NSUTF8StringEncoding error:NULL] isEqual:expected]);
+                assert([fm removeItemAtPath:arguments error:NULL]);
+            }
+        }
         // Missing assets make automatic installation fail before any download or filesystem install.
         testRelease = @{@"tag_name": @"v1.2.3", @"draft": @NO, @"prerelease": @NO, @"assets": @[]};
-        for (NSNumber *automatic in @[@NO, @YES]) for (NSNumber *install in @[@NO, @YES]) {
+        for (NSNumber *force in @[@NO, @YES]) for (NSNumber *automatic in @[@NO, @YES]) for (NSNumber *install in @[@NO, @YES]) {
             testPreferences = [@{@"AutomaticallyInstallUpdates": automatic} mutableCopy];
-            int result = updaterRun(YES, install.boolValue);
+            NSUInteger requests = releaseRequests;
+            int result = updaterRun(force.boolValue, install.boolValue);
             assert(result == (automatic.boolValue || install.boolValue ? 1 : 0));
-            assert([[NSString stringWithContentsOfFile:arguments encoding:NSUTF8StringEncoding error:NULL]
-                isEqual:@"--notify-update\n1.2.3\n--available\n"]);
-            assert([testPreferences[@"LatestVersion"] isEqual:@"1.2.3"]);
-            assert([fm removeItemAtPath:arguments error:NULL]);
+            if (!force.boolValue && !install.boolValue && automatic.boolValue) {
+                assert([[NSString stringWithContentsOfFile:arguments encoding:NSUTF8StringEncoding error:NULL]
+                    isEqual:@"--notify-update\n1.2.3\n--available\n"]);
+                assert([fm removeItemAtPath:arguments error:NULL]);
+            } else {
+                assert(![fm fileExistsAtPath:arguments]);
+            }
+            if (releaseRequests > requests) assert([testPreferences[@"LatestVersion"] isEqual:@"1.2.3"]);
         }
         // Failure to launch the notifier must not hide the install failure exit code.
         assert([fm removeItemAtPath:notifier error:NULL]);
-        assert(updaterRun(YES, YES) == 1);
-        assert(releaseRequests == 5);
+        testPreferences = [@{@"AutomaticallyInstallUpdates": @YES} mutableCopy];
+        assert(updaterRun(NO, NO) == 1);
+        assert(releaseRequests == 8);
     } @finally {
         assert([fm removeItemAtPath:temporary error:NULL]);
     }
-    puts("Passed updater fallback checks: automatic and explicit install failures notify availability and return 1; no network or real install.");
+    puts("Passed updater notification checks: manual runs stay silent; scheduled install failures notify availability; exit codes preserved; no network or real install.");
 }
 
 int main(void) {
     @autoreleasepool {
-        testInstallFailureNotification();
+        testUpdateNotifications();
         assert(runTool(@"/usr/bin/true", @[], 2));
         assert(!runTool(@"/usr/bin/false", @[], 2));
         assert(runTool(@"/bin/test", @[@"two words", @"=", @"two words"], 2));

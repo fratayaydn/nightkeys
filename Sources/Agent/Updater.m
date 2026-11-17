@@ -316,6 +316,13 @@ static BOOL installRelease(NSURLSession *session, NSDictionary *release, NSStrin
     return success && clean;
 }
 
+static void notifyUpdate(NSURL *installed, NSString *version, BOOL force, BOOL install, BOOL automatic, BOOL failed) {
+    if (force || install) return;
+    // Resolve the main executable at the installed path after the swap, so the new app sends the notification.
+    NSString *notifier = [installed URLByAppendingPathComponent:@"Contents/MacOS/NightKeys"].path;
+    runTool(notifier, @[@"--notify-update", version, automatic && !failed ? @"--installed" : @"--available"], 60);
+}
+
 int updaterRun(BOOL force, BOOL install) {
     CFPreferencesAppSynchronize((__bridge CFStringRef)BundleID);
     char build[256] = {0};
@@ -368,9 +375,7 @@ int updaterRun(BOOL force, BOOL install) {
         }
         BOOL automatic = install || preferenceEnabled(@"AutomaticallyInstallUpdates");
         BOOL failed = automatic && !installRelease(session, release, version, current, installed);
-        // Resolve the main executable at the installed path after the swap, so the new app sends the notification.
-        NSString *notifier = [installed URLByAppendingPathComponent:@"Contents/MacOS/NightKeys"].path;
-        runTool(notifier, @[@"--notify-update", version, automatic && !failed ? @"--installed" : @"--available"], 60);
+        notifyUpdate(installed, version, force, install, automatic, failed);
         return failed ? 1 : 0;
     } @finally {
         [session invalidateAndCancel];
