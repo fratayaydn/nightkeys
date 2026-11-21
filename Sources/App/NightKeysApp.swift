@@ -159,6 +159,7 @@ final class Model: ObservableObject {
     private let settingsChanged: () -> Void
     private let agent = SMAppService.agent(plistName: agentPlistName)
     private var luxTimer: Timer?
+    private var reregistering = false
 
     init(defaults: UserDefaults = .standard, startObserving: Bool = true,
          previewBrightness: @escaping (Float) -> Void = NTSetBrightness,
@@ -198,7 +199,7 @@ final class Model: ObservableObject {
     }
 
     func readAgentState() {
-        agentStatus = agent.status
+        if !reregistering { agentStatus = agent.status }
         defaults.synchronize()
         permissionGranted = defaults.object(forKey: permissionKey) as? Bool
         brightness = readLevel(from: defaults)
@@ -222,6 +223,8 @@ final class Model: ObservableObject {
         // Closing the window can terminate the app while the agent is unregistered.
         defaults.set(true, forKey: reregistrationPendingKey)
         defaults.synchronize()
+        agentStatus = agent.status  // shown until the sequence ends
+        reregistering = true
         DispatchQueue.global().async { [weak self, defaults = self.defaults] in
             var result = reregisterAgent()
             if result != .skipped && !agentIsRunning() { result = reregisterAgent() }  // right after an update the first pass may not take
@@ -234,6 +237,7 @@ final class Model: ObservableObject {
                 if result == .failed {
                     self?.errorMessage = "Could not enable NightKeys after the update. Close and reopen NightKeys to try again."
                 }
+                self?.reregistering = false
                 self?.readAgentState()
             }
         }
@@ -350,6 +354,7 @@ final class Model: ObservableObject {
     var isEnabled: Bool { agentStatus == .enabled || agentStatus == .requiresApproval }
 
     func setAgentEnabled(_ on: Bool, setEnabled: (Bool) throws -> Void = setLoginItemsEnabled) {
+        reregistering = false  // the user's choice is shown at once
         defaults.removeObject(forKey: reregistrationPendingKey)
         defaults.synchronize()
         do {
