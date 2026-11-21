@@ -149,6 +149,7 @@ final class Model: ObservableObject {
     @Published var checkingUpdates = false
     @Published var latestVersion: String?
     @Published var lastUpdateCheck: Date?
+    @Published var installedVersion = ""
     let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
 
     let hasKeyboard: Bool
@@ -170,6 +171,7 @@ final class Model: ObservableObject {
         self.settingsChanged = settingsChanged
         hasKeyboard = startObserving && NTHasBacklitKeyboard()
         brightness = readLevel(from: defaults)
+        installedVersion = version
         guard startObserving else { return }
         reregisterAfterUpdate()
         readSystemSettings()
@@ -238,6 +240,11 @@ final class Model: ObservableObject {
     }
 
     func readUpdateState() {
+        installedVersion = version
+        if let data = try? Data(contentsOf: Bundle.main.bundleURL.appendingPathComponent("Contents/Info.plist")),
+           let info = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any] {
+            installedVersion = info["CFBundleShortVersionString"] as? String ?? version
+        }
         defaults.synchronize()
         automaticUpdates = defaults.object(forKey: "AutomaticallyInstallUpdates") == nil
             || defaults.bool(forKey: "AutomaticallyInstallUpdates")
@@ -248,7 +255,7 @@ final class Model: ObservableObject {
     var availableVersion: String? {
         guard let latestVersion else { return nil }
         let latest = latestVersion.split(separator: ".").map(String.init)
-        let current = version.split(separator: ".").map(String.init)
+        let current = installedVersion.split(separator: ".").map(String.init)
         for index in 0..<3 {
             let a = index < latest.count ? latest[index] : "0"
             let b = index < current.count ? current[index] : "0"
@@ -452,7 +459,7 @@ struct ContentView: View {
                     Text("Only updates signed by the developer and notarized by Apple.")
                 }
                 HStack {
-                    Text("Version \(model.version), \(model.lastCheckedText.lowercased().replacingOccurrences(of: "checked:", with: "checked"))")
+                    Text("Version \(model.installedVersion), \(model.lastCheckedText.lowercased().replacingOccurrences(of: "checked:", with: "checked"))")
                         .lineLimit(1)
                     Spacer()
                     Button(model.checkingUpdates ? "Checking..." : "Check Now") { model.checkUpdates() }
