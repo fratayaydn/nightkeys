@@ -364,7 +364,7 @@ static void timerFired(void) {
 // During a long typing session the room may get brighter or darker: follow it.
 static void recheckAmbient(void) {
     gLuxCheckedAt = gLastKey;
-    if (!gAmbientEnabled || gLevel <= 0) {
+    if (gLevel <= 0) {
         DIAG(@"recheckAmbient result=skipped ambient enabled=%d level=%.3f", gAmbientEnabled, gLevel);
         return;
     }
@@ -401,6 +401,7 @@ static void systemSettingChanged(NSString *key, id value) {
         if (gSession) armTimer(gTimeout - (CFAbsoluteTimeGetCurrent() - gLastKey));
     } else if ([key isEqualToString:CB_AUTO_BRIGHTNESS]) {
         gAmbientEnabled = [value boolValue];
+        gLuxCheckedAt = 0;
     } else if ([key isEqualToString:CB_BRIGHTNESS]) {
         float level = [value floatValue];
         if (!isfinite(level)) return;

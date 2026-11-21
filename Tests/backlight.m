@@ -547,6 +547,24 @@ static void testKeyActivityCost(void) {
     assert(setLevel(gLevel, 0));
     assert(displayReads == previousDisplays && sessionReads == previousSessions);
 
+    // Disabling ambient mode lights a dark Never session on the next key press.
+    endSession();
+    gTimeout = 0;
+    gAmbientEnabled = YES;
+    gDisplay = client;
+    client.lux = @(gLuxLimit + 1);
+    [client.writes removeAllObjects];
+    keyActivity();
+    assert(gSession && !gLit && client.writes.count == 0);
+    assert(gLuxCheckedAt > 0);
+    systemSettingChanged(CB_AUTO_BRIGHTNESS, @NO);
+    assert(gLuxCheckedAt == 0);
+    keyActivity();
+    assert(gSession && gLit && client.writes.count == 1);
+    assert([client.writes.lastObject[@"level"] floatValue] == gLevel);
+    gDisplay = nil;
+    gTimeout = 10;
+
     NSNotificationCenter *center = [NSNotificationCenter new];
     registerDisplayWakeNotification(center);
     // Notifications must gate lighting even before the live display query catches up.
