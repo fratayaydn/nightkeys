@@ -221,15 +221,15 @@ final class Model: ObservableObject {
         defaults.set(true, forKey: reregistrationPendingKey)
         defaults.synchronize()
         DispatchQueue.global().async { [weak self, defaults = self.defaults] in
-            var success = reregisterAgent()
-            if !agentIsRunning() { success = reregisterAgent() }  // right after an update the first pass may not take
-            if success {
+            var result = reregisterAgent()
+            if result != .skipped && !agentIsRunning() { result = reregisterAgent() }  // right after an update the first pass may not take
+            if result != .failed {
                 defaults.set(currentBuildID, forKey: registeredBuildKey)
-                defaults.removeObject(forKey: reregistrationPendingKey)
+                if result == .registered { defaults.removeObject(forKey: reregistrationPendingKey) }
                 defaults.synchronize()
             }
             DispatchQueue.main.async {
-                if !success {
+                if result == .failed {
                     self?.errorMessage = "Could not enable NightKeys after the update. Close and reopen NightKeys to try again."
                 }
                 self?.readAgentState()
@@ -580,9 +580,11 @@ func startAgentOnce() { launchctl(["kickstart", agentJob]) }
 
 func agentIsRunning() -> Bool { launchctl(["print", agentJob]).contains("state = running") }
 
+enum ReregistrationResult { case registered, skipped, failed }
+
 /// Unregister, wait until launchd has dropped the job, register and start once: the sequence that refreshes
 /// the agent's launch constraint after an update (see scripts/install.sh).
-func reregisterAgent() -> Bool {
+func reregisterAgent() -> ReregistrationResult {
     try? setLoginItemsEnabled(false)
     for job in [updaterJob, agentJob] {
         for _ in 0..<70 {
@@ -591,12 +593,13 @@ func reregisterAgent() -> Bool {
         }
     }
     Thread.sleep(forTimeInterval: 1)
+    guard UserDefaults.standard.bool(forKey: reregistrationPendingKey) else { return .skipped }
     try? setLoginItemsEnabled(true)
     let agent = SMAppService.agent(plistName: agentPlistName)
     let success = agent.status == .enabled || agent.status == .requiresApproval
     startAgentOnce()
     Thread.sleep(forTimeInterval: 2)
-    return success
+    return success ? .registered : .failed
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
