@@ -409,13 +409,30 @@ static void testExternalBrightness(void) {
     keyActivity();
     assert(!gLit && gLevel == 0);
 
+    // A threshold change keeps the unfinished ramp and its pending save.
+    gLastBrightnessKey = CFAbsoluteTimeGetCurrent();
+    systemSettingChanged(CB_BRIGHTNESS, @0.25);
+    writes = client.writes.count;
+    before = preferenceWrites;
+    testPreferences[@"AmbientThresholdLux"] = @4;
+    settingsChanged(NULL, NULL, NULL, NULL, NULL);
+    assert(gLuxLimit == 4 && gLevel == 0.25f && gPreferencesLevel == 0 && gManualPending);
+    assert(client.writes.count == writes && preferenceWrites == before);
+    gManualAt -= 1.01;
+    manualTimerFired();
+    assert(!gManualPending && preferenceWrites == before + 1);
+    assert([testPreferences[@"Level"] floatValue] == 0.25f);
+
     // A newer direct window preference cancels the unfinished ramp.
     systemSettingChanged(CB_BRIGHTNESS, @0.875);
+    assert(gManualPending);
     testPreferences[@"Level"] = @0.375;
     settingsChanged(NULL, NULL, NULL, NULL, NULL);
     before = preferenceWrites;
+    gManualAt -= 1.01;
     manualTimerFired();
     assert(!gManualPending && gLevel == 0.375f && preferenceWrites == before);
+    assert(gPreferencesLevel == 0.375f && [testPreferences[@"Level"] floatValue] == 0.375f);
 
     // A gap over one second finishes the previous run before starting another.
     queueManualLevel(0.25, 100);

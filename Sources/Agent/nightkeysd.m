@@ -318,9 +318,12 @@ static void startManualSession(float level, CFAbsoluteTime now) {
 
 static void settingsChanged(CFNotificationCenterRef c, void *observer, CFNotificationName name, const void *object, CFDictionaryRef info) {
     float previous = gLevel, previousPreference = gPreferencesLevel;
-    cancelManualSave();  // The window's newer direct write wins over a pending external ramp.
     loadSettings();
-    if (gLevel == previousPreference && gLevel == previous) return;
+    if (gPreferencesLevel == previousPreference) {
+        gLevel = previous;
+        return;
+    }
+    cancelManualSave();  // The window's newer direct write wins over a pending external ramp.
     float preview = gLevel > 0.01f ? gLevel : 0;
     BOOL lit = setLevel(preview, kFadeInMs);
     startManualSession(preview, CFAbsoluteTimeGetCurrent());
