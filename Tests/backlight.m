@@ -268,6 +268,15 @@ static void testLevelPreferences(void) {
     gTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_resume(gTimer);
     testPreferences = [NSMutableDictionary new];
+    assert(ambientThresholdLux(NULL) == DEFAULT_AMBIENT_LUX);
+    for (id value in @[@0, @(-1), @(NAN), @"invalid"])
+        assert(ambientThresholdLux((__bridge CFPropertyListRef)value) == DEFAULT_AMBIENT_LUX);
+    for (NSNumber *value in @[@0.125, @4, @100001])
+        assert(ambientThresholdLux((__bridge CFPropertyListRef)value) == value.doubleValue);
+    testPreferences[@"AmbientThresholdLux"] = @0;
+    loadSettings();
+    assert(gLuxLimit == DEFAULT_AMBIENT_LUX);
+    [testPreferences removeAllObjects];
     for (id legacy in @[[NSNull null], @0, @0.01, @(-1), @0.75, @2]) {
         [testPreferences removeAllObjects];
         if (legacy != NSNull.null) testPreferences[@"StatusUserBrightness"] = legacy;

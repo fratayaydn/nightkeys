@@ -189,9 +189,18 @@ static float readLevel(void) {
     return legacy > 0.01 ? (float)legacy : 0.5f;
 }
 
+static double ambientThresholdLux(CFPropertyListRef value) {
+    double stored = 0;
+    if (value && CFGetTypeID(value) == CFNumberGetTypeID())
+        CFNumberGetValue(value, kCFNumberDoubleType, &stored);
+    return stored > 0 ? stored : DEFAULT_AMBIENT_LUX;
+}
+
 static void loadSettings(void) {
     CFPreferencesAppSynchronize(PREFS_DOMAIN);
-    gLuxLimit = prefDouble(KEY_AMBIENT_LUX, DEFAULT_AMBIENT_LUX, 0, 100000);
+    CFPropertyListRef value = CFPreferencesCopyAppValue(KEY_AMBIENT_LUX, PREFS_DOMAIN);
+    gLuxLimit = ambientThresholdLux(value);
+    if (value) CFRelease(value);
     gLevel = gPreferencesLevel = readLevel();
     DIAG(@"preferences Level=%.3f", gLevel);
 }
